@@ -288,11 +288,11 @@ that produce equivalent joinrels will compete in add_path().
 は常に単一のリスト項目です)、右辺のプラン(外側のreは常に単一の項目です)、
 およびブッシー・プラン(内側と外側の両方自体が結合します)を考えます。た
 とえば、{1 2 3 4}を構築する場合、{1 2 3}を{4}(左辺)に、{4}を{1 2 3}(右
-辺)に、{1 2}を{3 4}(ブッシー)に結合することを検討します。jointreeのス
+辺)に、{1 2}を{3 4}(ブッシー)に結合することを検討します。jointree・ス
 キャン・コードはこれらの潜在的な結合の組み合わせを一度に1つずつ生成し
-ますが、結合された結合されたベースrel同じ集合を生成するすべての方法は
-同じRelOptInfoを共有します。したがって、同等のjoinrelsを生成する異なる
-結合の組み合わせから生成されたパスは、add_path()で競合します。
+ますが、結合されたベース・リレーションの同じセットを生成するすべての方
+法は同じRelOptInfoを共有するため、同等のjoinrelsを生成する異なる結合の
+組み合わせから生成されたパスはadd_path()で競合します。
 
 The dynamic-programming approach has an important property that's not
 immediately obvious: we will finish constructing all paths for a given
@@ -307,11 +307,11 @@ would be much more complicated.
 動的プログラミングのアプローチには、直ちに自明ではない重要なプロパティ
 があります。つまり、特定のリレーションのすべてのパスの構築を完了してか
 ら、そのリレーションを含むリレーションのパスを構築します。これは、上位
-レベルの関係がそれを知る必要がある前に、各reの「最も安価なパス」を確実
-に識別できることを意味します。また、同じrelの別のパスの方が優れている
-ことがわかったときに、そのパスへの参照がすでに上位レベルの結合パスにあ
-る可能性を心配することなく、安全にパスを破棄することができます。これが
-ないと、パスのメモリ管理ははるかに複雑になります。
+レベルのリレーションがそれを知る必要がある前に、各relの「最も安価なパ
+ス」を確実に識別できることを意味します。また、同じrelの別のパスの方が
+優れていることがわかったときに、そのパスへの参照がすでに上位レベルの結
+合パスにある可能性を心配することなく、安全にパスを破棄することができま
+す。これがないと、パスのメモリ管理ははるかに複雑になります。
 
 Once we have built the final join rel, we use either the cheapest path
 for it or the cheapest path with the desired ordering (if that's cheaper
