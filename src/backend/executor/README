@@ -210,7 +210,7 @@ expression evaluation, but that seems like unnecessary overhead.)
 用されるCHECK制約式の集合)をExecInitExpr()が事前に計算することを許可し
 ます。これは、計画の無効化を必要とするイベントの数を大幅に増やさないと、
 計画時に行うことはできません。(以前は、この種の情報の一部は式の評価ご
-とに再チェックされていましたが、これは不要なオーバーヘッドのようです。
+とに再チェックされていましたが、これは不要なオーバーヘッドのようです。)
 
 Expression Initialization
 -------------------------
@@ -281,7 +281,7 @@ target Datum/isnull variables.  Due to the non-recursiveness of the
 ExprEvalStep representation that's usually easy to guarantee.
 
 各ExecInitExprRec()コールでは、部分式の結果を格納する場所を指定する必
-要があります(resv/resnullパラメータを使用)。これにより、式(sub-)を
+要があります(resv/resnullパラメータを使用)。これにより、(副)式を
 fcinfo->args[].value/isnullに直接評価するという上記のシナリオが可能に
 なりますが、注意が必要です。ターゲットDatum/isnull変数をさらに使用する
 前に実行するステップだけで結果が必要な場合を除き、ターゲット
