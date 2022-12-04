@@ -13,22 +13,46 @@
  *	  If a finalfunc is not supplied then the result is just the ending
  *	  value of transvalue.
  *
+ *		finalfuncが指定されない場合、結果はtransvalueの終了値のみとなります。
+ *
  *	  Other behaviors can be selected by the "aggsplit" mode, which exists
  *	  to support partial aggregation.  It is possible to:
+ *
+ *		その他の動作は、部分的な集約をサポートするために存在する「aggsplit」モードによって選択できます。
+ *		次のことが可能です。
+ *
  *	  * Skip running the finalfunc, so that the output is always the
  *	  final transvalue state.
+ *
+ *	* finalfuncの実行をスキップし、出力が常に最終的なtransvalue状態になるようにします。
+ *
  *	  * Substitute the combinefunc for the transfunc, so that transvalue
  *	  states (propagated up from a child partial-aggregation step) are merged
  *	  rather than processing raw input rows.  (The statements below about
  *	  the transfunc apply equally to the combinefunc, when it's selected.)
+ *
+ *	* transfuncの代わりにcombinefuncを使用すると、生の入力行を処理するのではなく、
+ * transvalue状態(子の部分集約ステップから伝播される)がマージされます。(以下の
+ * transfuncに関する説明は、combinefuncが選択された場合にも同様に当てはまります。
+ *
  *	  * Apply the serializefunc to the output values (this only makes sense
  *	  when skipping the finalfunc, since the serializefunc works on the
  *	  transvalue data type).
+ *
+ *	* 出力値にserializefuncを適用します(serializefuncはトランスバリューデータ型
+ *   で動作するため、finalfuncをスキップする場合にのみ意味があります)。
+ *
  *	  * Apply the deserializefunc to the input values (this only makes sense
  *	  when using the combinefunc, for similar reasons).
  *	  It is the planner's responsibility to connect up Agg nodes using these
  *	  alternate behaviors in a way that makes sense, with partial aggregation
  *	  results being fed to nodes that expect them.
+ *
+ *
+ *	* 入力値にdeserializefuncを適用します(これは、combinefuncを使用する場合にのみ
+ * 意味があります。同様の理由からです)。これらの代替動作を使用して、意味のある
+ * 方法でAggノードを接続し、部分的な集約結果をそれを期待するノードに供給するの
+ * は、プランナの責任です。
  *
  *	  If a normal aggregate call specifies DISTINCT or ORDER BY, we sort the
  *	  input tuples and eliminate duplicates (if required) before performing
@@ -38,15 +62,32 @@
  *	  is not supported in these cases, since we couldn't ensure global
  *	  ordering or distinctness of the inputs.
  *
+ * 通常の集約呼び出しでDISTINCTまたはORDER BYが指定されている場合は、上記のプ
+ * ロセスを実行する前に、入力タプルをソートし、(必要に応じて)重複を削除します。
+ * (ただし、順序集合の集約ではこれを行いません。このモジュールに関する限り、
+ * "ORDER BY"入力は通常の集約引数です)。入力のグローバルな順序付けや区別を保証
+ * できないため、このような場合には部分集約はサポートされないことに注意してく
+ * ださい。
+ *
  *	  If transfunc is marked "strict" in pg_proc and initcond is NULL,
  *	  then the first non-NULL input_value is assigned directly to transvalue,
  *	  and transfunc isn't applied until the second non-NULL input_value.
  *	  The agg's first input type and transtype must be the same in this case!
  *
+ * pg_procでtransfuncが"strict"とマークされ、initcondがNULLの場合、最初の非
+ * NULL入力値が直接transvalueに割り当てられ、transfuncは2番目の非NULL入力値ま
+ * で適用されません。この場合、aggの最初の入力タイプとtranstypeは同じである必
+ * 要があります。
+ *
  *	  If transfunc is marked "strict" then NULL input_values are skipped,
  *	  keeping the previous transvalue.  If transfunc is not strict then it
  *	  is called for every input tuple and must deal with NULL initcond
  *	  or NULL input_values for itself.
+ *
+ * transfuncが"strict"とマークされている場合、NULL input_valuesはスキップされ、
+ * 前のtransvalueが保持されます。transfuncが厳密でない場合は、全ての入力タプル
+ * に対して呼び出され、それ自身はNULL initcondまたはNULL input_valuesを扱わな
+ * ければなりません。
  *
  *	  If finalfunc is marked "strict" then it is not called when the
  *	  ending transvalue is NULL, instead a NULL result is created
@@ -54,14 +95,27 @@
  *	  of course).  A non-strict finalfunc can make its own choice of
  *	  what to return for a NULL ending transvalue.
  *
+ * finalfuncが"strict"とマークされている場合、終了transvalueがNULLのときにはこ
+ * の関数は呼び出されず、代わりにNULLの結果が自動的に生成されます(これはもちろ
+ * んstrict関数の通常の処理です)。strictでないfinalfuncは、NULLの終了
+ * transvalueに対して何を返すかを独自に選択することができます。
+ *
  *	  Ordered-set aggregates are treated specially in one other way: we
  *	  evaluate any "direct" arguments and pass them to the finalfunc along
  *	  with the transition value.
+ *
+ * 順序集合集約は、別の方法で特別に処理されます。つまり、「直接」引数を評価し、
+ * 遷移値とともにfinalfuncに渡します。finalfuncは、transvalue引数と"direct"引
+ * 数の他に、集約の入力引数に対応する追加引数を持つことができます。
  *
  *	  A finalfunc can have additional arguments beyond the transvalue and
  *	  any "direct" arguments, corresponding to the input arguments of the
  *	  aggregate.  These are always just passed as NULL.  Such arguments may be
  *	  needed to allow resolution of a polymorphic aggregate's result type.
+ *
+ * finalfuncは、transvalue引数と"direct"引数の他に、集約の入力引数に対応する追
+ * 加引数を持つことができます。これらは常に単にNULLとして渡されます。このよう
+ * な引数は、多様な集約の結果型の解決を可能にするために必要な場合があります。
  *
  *	  We compute aggregate input expressions and run the transition functions
  *	  in a temporary econtext (aggstate->tmpcontext).  This is reset at least
@@ -74,9 +128,23 @@
  *	  reset, at group boundaries so that aggregate transition functions can
  *	  register shutdown callbacks via AggRegisterCallback.
  *
+ * 集約入力式を計算し、一時的なecontext(aggstate->tmpcontext)で遷移関数を実行
+ * します。これは入力タプルごとに少なくとも1回はリセットされるため、transvalue
+ * データ型が参照渡しの場合は、より寿命の長いメモリコンテキストにコピーし、メ
+ * モリリークを避けるために前の値を解放するように注意する必要があります。
+ * transvaluesは、別のecontextsのセットであるaggstate->aggcontexts(グループ化
+ * セットごとに1つ、以下を参照)に格納されます。これらは、AGG_HASHEDモードのハッ
+ * シュテーブル構造にも使用されます。これらのecontextsは、グループ境界でリセッ
+ * トされるだけでなく再スキャンされるため、集約遷移関数はAggRegisterCallbackを
+ * 介してシャットダウンコールバックを登録できます。
+ *
  *	  The node's regular econtext (aggstate->ss.ps.ps_ExprContext) is used to
  *	  run finalize functions and compute the output tuple; this context can be
  *	  reset once per output tuple.
+ *
+ * ノードの通常のecontext(aggstate->ss.ps.ps_ExprContext)は、finalize関数を実
+ * 行して出力タプルを計算するために使用されます。このコンテキストは、出力タプ
+ * ルごとに1回リセットできます。
  *
  *	  The executor's AggState node is passed as the fmgr "context" value in
  *	  all transfunc and finalfunc calls.  It is not recommended that the
@@ -99,9 +167,31 @@
  *	  to store working state in addition to the nominal transition value; they
  *	  can use the memory context returned by AggCheckCallContext() to do that.
  *
+ * エクゼキュータのAggStateノードは、すべてのtransfuncおよびfinalfunc呼び出し
+ * でfmgr"context"値として渡されます。遷移関数がAggStateノードを直接参照するこ
+ * とはお勧めできませんが、AggCheckCallContext()を使用して、遷移関数が
+ * nodeAgg.cによって(通常のSQL関数としてではなく)呼び出されていることを確認で
+ * きます。遷移関数がこれを知りたいと思う主な理由は、すべての呼び出しで固定サ
+ * イズの参照渡し遷移値をpallocするのを避けるためです。通常、関数が参照渡しの
+ * 入力を変更することは完全に禁止されていますが、集約の場合、左側の入力は初期
+ * 遷移値か以前の関数結果のいずれかであり、どちらの場合もその値を保持する必要
+ * はありません。例についてはint8inc()を参照してください。EEOP_AGG_PLAIN_TRANS
+ * ステップは、前の摺り付け値ポインタが返されたときにデータコピーステップを回
+ * 避するようにコーディングされていることに注意してください。また、遷移値が拡
+ * 張オブジェクトである場合に、データのコピーを繰り返さないようにすることもで
+ * きます。これを行うには、AggCheckCallContext()によって戻されたメモリー・コン
+ * テキストの子コンテキストにある拡張オブジェクトを返すように、遷移関数で注意
+ * する必要があります。また、一部の遷移関数では、公称遷移値に加えて作業状態を
+ * 格納する必要があります。AggCheckCallContext()によって返されるメモリコンテキ
+ * ストを使用して、これを行うことができます。
+ *
  *	  Note: AggCheckCallContext() is available as of PostgreSQL 9.0.  The
  *	  AggState is available as context in earlier releases (back to 8.1),
  *	  but direct examination of the node is needed to use it before 9.0.
+ *
+ * 注意:AggCheckCallContext()はPostgreSQL 9.0で利用可能です。AggStateは以前の
+ * リリース(8.1まで)ではコンテキストとして使用できますが、9.0より前のリリース
+ * で使用するにはノードを直接調べる必要があります。
  *
  *	  As of 9.4, aggregate transition functions can also use AggGetAggref()
  *	  to get hold of the Aggref expression node for their aggregate call.
@@ -109,6 +199,12 @@
  *	  supported as window functions.  (A regular aggregate function would
  *	  need some fallback logic to use this, since there's no Aggref node
  *	  for a window function.)
+ *
+ * 9.4では、集約遷移関数はAggGetAggref()を使用して、集約呼び出しのためのAgref
+ * 式ノードを取得することもできます。これは主にウィンドウ関数としてサポートさ
+ * れていない順序集合集約を対象としています。(通常の集約関数では、ウィンドウ関
+ * 数用のAgrefノードがないため、これを使用するには何らかのフォールバック・ロジッ
+ * クが必要です。
  *
  *	  Grouping sets:
  *
@@ -121,6 +217,13 @@
  *	  (the list of grouping sets is ordered from most specific to least
  *	  specific).
  *
+ * ROLLUP句と構造的に同等なグループ化セットのリスト(例: (a,b,c),(a,b),(a))は、
+ * 順序付けられたデータに対して1回のパスで処理できます。これを行うには、同時に
+ * 処理されるグループ化セットごとに遷移値の個別のセットを保持します。入力タプ
+ * ルごとにすべての遷移値を更新し、グループ境界では、グループ化値が変更された
+ * 状態(リストの先頭から開始)をリセットします(グループ化セットのリストは、最も
+ * 固有性の高いものから最も固有性の低いものの順になります)。
+ *
  *	  Where more complex grouping sets are used, we break them down into
  *	  "phases", where each phase has a different sort order (except phase 0
  *	  which is reserved for hashing).  During each phase but the last, the
@@ -130,11 +233,25 @@
  *	  data for the first phase is handled by the planner, as it might be
  *	  satisfied by underlying nodes.)
  *
+ * より複雑なグループ化セットを使用する場合は、各フェーズが異なるソート順を持
+ * つ「フェーズ」に分割します(ハッシュ用に予約されているフェーズ0を除く)。各
+ * フェーズ(最後のフェーズを除く)では、入力タプルは次のフェーズのソート順にキー
+ * 設定されたtuplesortに追加で格納されます。各フェーズ(最初のフェーズを除く)で
+ * は、入力タプルは以前にソートされたデータから取得されます。(最初のフェーズの
+ * データのソートは、基礎となるノードによって満たされる可能性があるため、プラ
+ * ンナによって処理されます。)
+ *
  *	  Hashing can be mixed with sorted grouping.  To do this, we have an
  *	  AGG_MIXED strategy that populates the hashtables during the first sorted
  *	  phase, and switches to reading them out after completing all sort phases.
  *	  We can also support AGG_HASHED with multiple hash tables and no sorting
  *	  at all.
+ *
+ * ハッシュは、ソートされたグループ化と混在させることができます。これを行うた
+ * めに、AGG_MIXED戦略を使用します。この戦略では、最初のソート・フェーズ中にハッ
+ * シュ・テーブルを移入し、すべてのソート・フェーズが完了した後にハッシュ・テー
+ * ブルの読取りに切り替えます。また、複数のハッシュテーブルを持ち、ソートをまっ
+ * たく行わないAGG_HASHEDをサポートすることもできます。
  *
  *	  From the perspective of aggregate transition and final functions, the
  *	  only issue regarding grouping sets is this: a single call site (flinfo)
@@ -146,6 +263,14 @@
  *	  sensitive to the grouping set for which the aggregate function is
  *	  currently being called.
  *
+ * 集約遷移関数と最終関数の観点からすると、グループ化セットに関する唯一の問題
+ * は、集約関数の単一のコールサイト(flinfo)が、複数の異なる遷移値を順番に更新
+ * するために使用される可能性があることです。したがって、関数は、遷移値の一部
+ * として論理的に属するもの(最も重要なのは、遷移値が存在するメモリコンテキスト)を
+ * flinfoにキャッシュしてはなりません。サポートAPI関数(AggCheckCallContext、
+ * AggRegisterCallback)は、集約関数が現在呼び出されているグループ化セットに依
+ * 存します。
+ *
  *	  Plan structure:
  *
  *	  What we get from the planner is actually one "real" Agg node which is
@@ -153,6 +278,11 @@
  *	  of Agg nodes hung off the side via the "chain" field.  This is because an
  *	  Agg node happens to be a convenient representation of all the data we
  *	  need for grouping sets.
+ *
+ * プランナから取得されるものは、実際には1つの「本物の」Aggノードであり、これ
+ * は計画ツリーの一部ですが、オプションで、「chain」フィールドを介して横にぶら
+ * 下がったAggノードの追加リストを持ちます。これは、Aggノードが、セットをグルー
+ * プ化するために必要なすべてのデータの便利な表現であるためです。
  *
  *	  For many purposes, we treat the "real" node as if it were just the first
  *	  node in the chain.  The chain must be ordered such that hashed entries
@@ -164,10 +294,24 @@
  *	  nodes must be of the same type; if it is AGG_PLAIN, there can be no
  *	  chained nodes.
  *
+ * 多くの目的で、「実際の」ノードは、チェーン内の最初のノードであるかのように
+ * 扱われます。チェーンは、ハッシュされたエントリがソート済み/プレーンエントリ
+ * の前に来るように順序付けられる必要があります。両方のタイプが存在する場合、
+ * 実際のノードはAGG_MIXEDとマークされます(この場合、実際のノードはハッシュさ
+ * れたグループの1つを記述し、他のAGG_HASHEDノードがオプションでチェーン内で続
+ * き、その後にAGG_SORTEDまたは(1つの)AGG_PLAINノードが続きます)。実際のノード
+ * がAGG_HASHEDまたはAGG_SORTEDとマークされている場合、すべてのチェーンノード
+ * は同じタイプである必要があります。AGG_PLAINの場合、チェーンノードは存在でき
+ * ません。
+ * 
  *	  We collect all hashed nodes into a single "phase", numbered 0, and create
  *	  a sorted phase (numbered 1..n) for each AGG_SORTED or AGG_PLAIN node.
  *	  Phase 0 is allocated even if there are no hashes, but remains unused in
  *	  that case.
+ *
+ * ハッシュされたすべてのノードを1つの「フェーズ」(番号0)に収集し、AGG_SORTED
+ * またはAGG_PLAINノードごとにソートされたフェーズ(番号1.n)を作成します。ハッ
+ * シュがない場合でもフェーズ0が割り当てられますが、その場合は未使用のままです。
  *
  *	  AGG_HASHED nodes actually refer to only a single grouping set each,
  *	  because for each hashed grouping we need a separate grpColIdx and
@@ -176,6 +320,14 @@
  *	  the first one has an associated Sort node which describes the sort order
  *	  to be used; the first sorted node takes its input from the outer subtree,
  *	  which the planner has already arranged to provide ordered data.
+ *
+ * AGG_HASHEDノードは、実際にはそれぞれ1つのグループ化セットのみを参照します。
+ * これは、ハッシュされた各グループ化に対して、個別のgrpColIdxとnumGroupsの推
+ * 定値が必要なためです。AGG_SORTEDノードは、「ロールアップ」(ソート順を共有す
+ * るグループ化セットのリスト)を表します。最初のノード以外の各AGG_SORTEDノード
+ * には、使用するソート順を記述するSortノードが関連付けられています。最初にソー
+ * トされたノードは、プランナが順序付けられたデータを提供するためにすでに配置
+ * した外部サブツリーから入力を取得します。
  *
  *	  Memory and ExprContext usage:
  *
@@ -188,11 +340,24 @@
  *	  populating hashtables; however, we only need one context for all the
  *	  hashtables.
  *
+ * 入力行にわたって集約値を累積するため、単純な入力/出力タプル・コンテキストよ
+ * りも多くのメモリー・コンテキストを使用する必要があります。実際、ロールアッ
+ * プでは、グループ境界上の内部(粒度の細かい)集約をリセットしながら、外部(粒度
+ * の粗い)グループの値を蓄積し続けることができるように、グループセットごとに個
+ * 別のコンテキストが必要です。これに加えて、ハッシュ・テーブルを同時に作成す
+ * ることもできますが、すべてのハッシュ・テーブルに必要なコンテキストは1つだけ
+ * です。
+ *
  *	  So we create an array, aggcontexts, with an ExprContext for each grouping
  *	  set in the largest rollup that we're going to process, and use the
  *	  per-tuple memory context of those ExprContexts to store the aggregate
  *	  transition values.  hashcontext is the single context created to support
  *	  all hash tables.
+ *
+ * したがって、処理する最大ロールアップ内の各グループ・セットにExprContextを持
+ * つ配列aggcontextsを作成し、これらのExprContextsのタプルごとのメモリー・コン
+ * テキストを使用して集約推移値を格納します。hashcontextは、すべてのハッシュテー
+ * ブルをサポートするために作成された単一のコンテキストです。
  *
  *	  Spilling To Disk
  *
@@ -206,6 +371,15 @@
  *	  hash_mem (if a batch does exceed hash_mem, it must be spilled
  *	  recursively).
  *
+ * ハッシュ・アグリゲーションを実行する際に、ハッシュテーブルのメモリが制限を
+ * 超えた場合(hash_agg_check_limits()を参照)、"spill mode"に入ります。スピルモー
+ * ドでは、ハッシュテーブルにすでに存在するグループの遷移状態だけを進めます。
+ * 新しいハッシュテーブルエントリを作成する(そして新しい遷移状態を初期化する)
+ * 必要があるタプルの場合は、後で処理するためにディスクに書き出させます。タプ
+ * ルは分割された方法で書き出されるため、後続のバッチは小さくなり、hash_memを
+ * 超える可能性が低くなります(バッチがhash_memを超えた場合は、再帰的に書き出す
+ * 必要があります)。
+ *
  *	  Spilled data is written to logical tapes. These provide better control
  *	  over memory usage, disk space, and the number of files than if we were
  *	  to use a BufFile for each spill.  We don't know the number of tapes needed
@@ -214,10 +388,23 @@
  *	  As a particular tape is read, logtape.c recycles its disk space. When a
  *	  tape is read to completion, it is destroyed entirely.
  *
+ * 溢れ出たデータは、論理テープに書き込まれます。これにより、各溢れに対して
+ * BufFileを使用する場合よりも、メモリ使用量、ディスク領域、およびファイル数を
+ * より適切に制御できます。アルゴリズムの開始時に必要なテープの数がわからない
+ * ため(再帰が発生する可能性があるため)、最初にテープセットが割り当てられ、必
+ * 要に応じて個々のテープが作成されます。特定のテープが読み取られると、
+ * logtape.cはディスク領域を再利用します。テープの読み取りが完了すると、テープ
+ * は完全に破棄されます。
+ *
  *	  Tapes' buffers can take up substantial memory when many tapes are open at
  *	  once. We only need one tape open at a time in read mode (using a buffer
  *	  that's a multiple of BLCKSZ); but we need one tape open in write mode (each
  *	  requiring a buffer of size BLCKSZ) for each partition.
+ *
+ * 一度に多くのテープを開くと、テープのバッファが大量のメモリを消費することが
+ * あります。読み取りモードでは(BLCKSZの倍数のバッファを使用して)一度に1つのテー
+ * プだけを開く必要がありますが、書き込みモードではパーティションごとに1つのテー
+ * プを開く必要があります(それぞれBLCKSZサイズのバッファが必要です)。
  *
  *	  Note that it's possible for transition states to start small but then
  *	  grow very large; for instance in the case of ARRAY_AGG. In such cases,
@@ -225,6 +412,11 @@
  *	  this situation by estimating what will fit in the available memory, and
  *	  imposing a limit on the number of groups separately from the amount of
  *	  memory consumed.
+ *
+ * ARRAY_AGGのように、遷移状態が小さい状態から始まって非常に大きくなる可能性が
+ * あることに注意してください。このような場合でも、hash_memを大幅に超えること
+ * は可能です。この状況を回避するために、使用可能なメモリに適合するものを推定
+ * し、消費されるメモリの量とは別にグループの数に制限を課します。
  *
  *    Transition / Combine function invocation:
  *
@@ -236,6 +428,13 @@
  *    issues due to repeated uses of expression evaluation, complications due
  *    to filter expressions having to be evaluated early, and allows to JIT
  *    the entire expression into one native function.
+ *
+ * パフォーマンス上の理由から、結合関数を含む遷移関数は、式評価エンジンを使用
+ * して引数を計算した後、nodeAgg.cから1つずつ呼び出されることはありません。代
+ * わりにExecBuildAggTrans()は、引数の評価と遷移関数の呼び出しの両方を行う1つ
+ * の大きな式を作成します。これにより、式の評価を繰り返し使用することによるパ
+ * フォーマンスの問題や、フィルタ式を早期に評価する必要があることによる複雑さ
+ * が回避され、式全体を1つのネイティブ関数にJITで変換できます。
  *
  * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
