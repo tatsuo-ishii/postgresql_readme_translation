@@ -10,20 +10,42 @@ more tuples are available.  If the node is not a primitive relation-scanning
 node, it will have child node(s) that it calls in turn to obtain input
 tuples.
 
+エクゼキュータは「計画ノード」のツリーを処理します。計画ツリーは基本的
+に、タプル処理操作の要求プル・パイプラインです。各ノードは、呼び出され
+ると、出力シーケンス内に次のタプルを生成します。使用可能なタプルがない
+場合はNULLになります。ノードがプリミティブなリレーションスキャンノード
+でない場合、入力タプルを取得するために順番に呼び出す子ノードがあります。
+
 Refinements on this basic model include:
+
+この基本モデルには、次のような改良が加えられています。
 
 * Choice of scan direction (forwards or backwards).  Caution: this is not
 currently well-supported.  It works for primitive scan nodes, but not very
 well for joins, aggregates, etc.
 
+* スキャン方向の選択(前方または後方)。注意:これは現在十分にサポートさ
+れていません。これはプリミティブなスキャンノードでは動作しますが、結合
+や集約などではあまりうまくいきません。
+
 * Rescan command to reset a node and make it generate its output sequence
 over again.
+
+* [再スキャン](Rescan)コマンドを使用してノードをリセットし、出力シーケ
+  ンスを再生成します。
 
 * Parameters that can alter a node's results.  After adjusting a parameter,
 the rescan command must be applied to that node and all nodes above it.
 There is a moderately intelligent scheme to avoid rescanning nodes
 unnecessarily (for example, Sort does not rescan its input if no parameters
 of the input have changed, since it can just reread its stored sorted data).
+
+* ノードの結果を変更するパラメータ。パラメータを調整した後、再スキャン
+コマンドをそのノードとその上のすべてのノードに適用する必要があります。
+ノードの不必要な再スキャンを避けるために、適度にインテリジェントなスキー
+ムがあります(たとえば、Sortは格納されたソート済みデータを再読み込みで
+きるため、入力のパラメータが変更されていない場合は入力を再スキャンしま
+せん)。
 
 For a SELECT, it is only necessary to deliver the top-level result tuples
 to the client.  For INSERT/UPDATE/DELETE, the actual table modification
@@ -41,8 +63,24 @@ be used for other table types.)  For DELETE, the plan tree need only deliver
 junk row-identity column(s), and the ModifyTable node visits each of those
 rows and marks the row deleted.  MERGE is described below.
 
+SELECTでは、最上位レベルの結果タプルをクライアントに渡すだけで済みます。
+INSERT/UPDATE/DELETEの場合、実際のテーブル変更操作はトップレベルの「テー
+ブル修正」(ModifyTable)プランノードで実行されます。クエリにRETURNING句
+が含まれている場合、ModifyTableノードは計算されたRETURNING行を出力とし
+て送信します。それ以外の場合は何も返しません。INSERTの処理は非常に単純
+で、ModifyTableの下の計画ツリーから返されたタプルが正しい結果リレーショ
+ンに挿入されます。UPDATEの場合、計画ツリーは更新された列の新しい値に加
+えて、更新されるテーブル行を識別する「ジャンク」(非表示)列を返します。
+ModifyTableノードは、変更されていない列の値を抽出するためにその行をフェッ
+チし、値を新しい行に結合して、更新を適用する必要があります。(ヒープテー
+ブルの場合、row-identity junk列はCTIDですが、他のテーブルタイプでは他
+のものが使用される場合があります)。DELETEの場合、計画ツリーはjunk
+row-identity列のみを提供する必要があり、ModifyTableノードはこれらの各
+行を訪問して削除された行をマークします。MERGEについては下で説明します。
+
 XXX a great deal more documentation needs to be written here...
 
+XXX ここにはさらに多くの文書を書く必要があります.
 
 Plan Trees and State Trees
 --------------------------
@@ -58,12 +96,31 @@ executor is concerned: all data that is modified during execution is in the
 state tree.  Read-only plan trees make life much simpler for plan caching and
 reuse.
 
+プランナが提供する計画ツリーには、Planノード(struct Planから派生した
+struct型)のツリーが含まれています。エクゼキュータの起動中に、エクゼキュー
+タ状態ノードを含む同一構造の併せて構築します。一般的に、すべてのPlanノー
+ドタイプには、対応するエクゼキュータ状態ノードタイプがあります。状態ツ
+リーの各ノードには、プランツリーの対応するノードへのポインタと、そのノー
+ドタイプを実装するために必要なエクゼキュータ状態データがあります。この
+構成により、エクゼキュータに関する限り、Planツリーを完全に読み取り専用
+にすることができます。実行中に変更されたすべてのデータは状態ツリーにあ
+ります。読み取り専用のPlanツリーを使用すると、計画のキャッシュと再利用
+が非常に簡単になります。
+
 A corresponding executor state node may not be created during executor startup
 if the executor determines that an entire subplan is not required due to
 execution time partition pruning determining that no matching records will be
 found there.  This currently only occurs for Append and MergeAppend nodes.  In
 this case the non-required subplans are ignored and the executor state's
 subnode array will become out of sequence to the plan's subplan list.
+
+対応するエクゼキュータ状態ノードは、エクゼキュータが、一致するレコード
+がそこで見つからないことが実行時のパーティションプルーニングで検出され
+たために、サブプラン全体が必要でないことを決定された場合、エクゼキュー
+タ起動中に作成されないことがあります。これは現在、追加ノードと
+MergeAppendノードに対してのみ発生します。この場合、不要なサブプランは
+無視され、エクゼキュータ状態のサブノード配列は、プランのサブプランリス
+トの順序から外れます。
 
 Each Plan node may have expression trees associated with it, to represent
 its target list, qualification conditions, etc.  These trees are also
@@ -72,11 +129,22 @@ does not mirror the Plan expression's tree shape, as explained below.
 Rather, there's just one ExprState node per expression tree, although this
 may have sub-nodes for some complex expression node types.
 
+各計画ノードには、ターゲット・リスト、必要条件などを表すために、関連付
+けられた式ツリーがあります。これらのツリーはエクゼキュータに対しても読
+み取り専用ですが、以下で説明するように、式評価のためのエクゼキュータの
+状態はPlan式のツリー形状を反映しません。複雑なエクスプレッションノード
+タイプにはサブノードがある場合がありますが、エクスプレッションツリーご
+とにExprStateノードは1つだけです。
+
 Altogether there are four classes of nodes used in these trees: Plan nodes,
 their corresponding PlanState nodes, Expr nodes, and ExprState nodes.
 (Actually, there are also List nodes, which are used as "glue" in all
 three tree-based representations.)
 
+これらのツリーで使用されるノードには、計画ノード、それに対応する
+PlanStateノード、Exprノード、ExprStateノードの全部で4つのクラスがあり
+ます。(実際には、3つのツリーベースの表現すべてで「接着剤」として使用さ
+れるリストノードもあります。)
 
 Expression Trees and ExprState nodes
 ------------------------------------
@@ -89,6 +157,14 @@ evaluate the expression in a compact, linear form.  That compact form is
 stored as a flat array in ExprState->steps[] (an array of ExprEvalStep,
 not ExprEvalStep *).
 
+Planツリーとは対照的に、式ツリーは、状態ノードの対応するツリーにミラー
+リングされません。代わりに、個別に実行可能な式ツリー(例:プランの条件ま
+たはターゲット・リスト)は1つのExprStateノードで表されます。ExprStateノー
+ドには、エクスプレッションをコンパクトな線形形式で評価するために必要な
+情報が含まれています。このコンパクトな形式は、ExprState->ステップ
+[](ExprEvalStep*ではなくExprEvalStepの配列)のフラットな配列として格納
+されます。
+
 The reasons for choosing such a representation include:
 - commonly the amount of work needed to evaluate one Expr-type node is
   small enough that the overhead of having to perform a tree-walk
@@ -97,6 +173,18 @@ The reasons for choosing such a representation include:
   function, reducing stack depth and function call overhead.
 - such a representation is usable both for fast interpreted execution,
   and for compiling into native code.
+
+このような表現を選択する理由は次のとおりです。
+
+- 一般的に、1つのExprタイプのノードを評価するために必要な作業量は十分
+  に小さいため、評価中にツリーウォークを実行する必要があるオーバーヘッ
+  ドが重要になります。
+
+- フラットな表現は、単一の関数内で非再帰的に評価することができ、スタッ
+  クの深さと関数呼び出しのオーバーヘッドを削減します。
+
+- このような表現は、高速なインタープリタ実行とネイティブコードへのコン
+  パイルの両方に使用できます。
 
 The Plan-tree representation of an expression is compiled into an
 ExprState node by ExecInitExpr().  As much complexity as possible should
@@ -112,6 +200,17 @@ greatly increasing the number of events that require plan invalidation.
 (Previously, some information of this kind was rechecked on each
 expression evaluation, but that seems like unnecessary overhead.)
 
+式のプランツリー表現は、ExecInitExpr()によってExprStateノードにコンパ
+イルされます。インタープリター・バージョンとコンパイル・バージョンの両
+方で複雑さを処理する必要がある場合、実行時間ではなく、できるだけ複雑さ
+をExecInitExpr()(およびヘルパー)で処理する必要があります。実行アプロー
+チ間で作業を重複させることに加えて、ランタイム初期化チェックには、式が
+評価されるたびに、小さいが顕著なコストがかかります。したがって、1つの
+問い合わせの実行中に変化しないと予想される情報(例えば、ドメイン型に適
+用されるCHECK制約式の集合)をExecInitExpr()が事前に計算することを許可し
+ます。これは、計画の無効化を必要とするイベントの数を大幅に増やさないと、
+計画時に行うことはできません。(以前は、この種の情報の一部は式の評価ご
+とに再チェックされていましたが、これは不要なオーバーヘッドのようです。
 
 Expression Initialization
 -------------------------
@@ -119,6 +218,10 @@ Expression Initialization
 During ExecInitExpr() and similar routines, Expr trees are converted
 into the flat representation.  Each Expr node might be represented by
 zero, one, or more ExprEvalSteps.
+
+ExecInitExpr()などのルーチンでは、Exprツリーはフラットな表現に変換され
+ます。各Exprノードは、0、1、または複数のExprEvalStepsで表すことができ
+ます。
 
 Each ExprEvalStep's work is determined by its opcode (of enum ExprEvalOp)
 and it stores the result of its work into the Datum variable and boolean
@@ -132,6 +235,16 @@ args[].value .isnull elements in the FunctionCallInfoBaseData struct that
 is used by the function evaluation step, thus avoiding extra work to copy
 the result values around.
 
+各ExprEvalStepの作業はオペコード(enum ExprEvalOp)によって決定され、作
+業の結果はExprEvalStep->resvalue/resnullが指すDatum変数とboolean null
+フラグ変数に格納されます。複雑な式は、いくつかのステップを連鎖させるこ
+とによって実行されます。たとえば、"a+b"(2つのVar式を持つ1つのOpExpr)は、
+Var値を取得するための2つのステップと、+演算子の基礎となる関数の評価の
+ための1つのステップとして表されます。Varsのステップは、関数評価ステッ
+プで使用されるFunctionCallInfoBaseData構造体の適切な
+args[].value.isnull要素を直接指し示すresvalue/resnullを持つため、結果
+値をコピーするための余分な作業が回避されます。
+
 The last entry in a completed ExprState->steps array is always an
 EEOP_DONE step; this removes the need to test for end-of-array while
 iterating.  Also, if the expression contains any variable references (to
@@ -141,10 +254,22 @@ tuples have been deconstructed to make the required columns directly
 available (cf. slot_getsomeattrs()).  This allows individual Var-fetching
 steps to be little more than an array lookup.
 
+完了したExprState->steps配列の最後のエントリは、常にEEOP_DONEステップ
+です。これにより、繰り返し処理中に配列の終わりをテストする必要がなくな
+ります。また、式に変数参照(ExprContextのINNER、OUTER、またはSCANタプル
+のユーザカラムへの参照)が含まれている場合、steps配列はEEOP_*_FETCHSOME
+ステップから始まります。これにより、関連するタプルが分解され、必要なカ
+ラムが直接使用できるようになります( slot_getsomeattrs()参照)。これによ
+り、個々のVar取得ステップは配列のルックアップ程度になります。
+
 Most of ExecInitExpr()'s work is done by the recursive function
 ExecInitExprRec() and its subroutines.  ExecInitExprRec() maps one Expr
 node into the steps required for execution, recursing as needed for
 sub-expressions.
+
+ExecInitExpr()の作業のほとんどは、再帰関数ExecInitExprRec()とそのサブ
+ルーチンによって行われます。ExecInitExprRec()は、1つのExprノードを実行
+に必要なステップにマッピングし、部分式の必要に応じて再帰的に処理します。
 
 Each ExecInitExprRec() call has to specify where that subexpression's
 results are to be stored (via the resv/resnull parameters).  This allows
@@ -154,6 +279,14 @@ variables may not be shared with another ExecInitExprRec() unless the
 results are only needed by steps executing before further usages of those
 target Datum/isnull variables.  Due to the non-recursiveness of the
 ExprEvalStep representation that's usually easy to guarantee.
+
+各ExecInitExprRec()コールでは、部分式の結果を格納する場所を指定する必
+要があります(resv/resnullパラメータを使用)。これにより、式(sub-)を
+fcinfo->args[].value/isnullに直接評価するという上記のシナリオが可能に
+なりますが、注意が必要です。ターゲットDatum/isnull変数をさらに使用する
+前に実行するステップだけで結果が必要な場合を除き、ターゲット
+Datum/isnull変数を別のExecInitExprRec()と共有することはできません。
+ExprEvalStep表示の非再帰性のため、通常は保証が容易です。
 
 ExecInitExprRec() pushes new operations into the ExprState->steps array
 using ExprEvalPushStep().  To keep the steps as a consecutively laid out
@@ -167,6 +300,17 @@ rather than being part of the ExprEvalStep array.  The overall result
 of a complete expression is typically returned into the resvalue/resnull
 fields of the ExprState node itself.
 
+ExecInitExprRec()は、ExprEvalPushStep()を使用して新しい操作を
+ExprState->ステップ配列にプッシュします。ステップを連続してレイアウト
+された配列として維持するために、ExprEvalPushStep()は十分なスペースがな
+い場合に配列全体を再割り当てする必要があります。そのため、式の初期化中
+にステップを直接指定することは*できません*。したがって、部分式の
+resv/resnullは通常、steps配列とは別にpallocされる何らかのストレージを
+指します。たとえば、ファンクションコールステップの
+FunctionCallInfoBaseDataは、ExprEvalStep配列の一部ではなく、個別に割り
+当てられます。エクスプレッション全体の結果は、通常、ExprStateノード自
+体のresvalue/resnullフィールドに返されます。
+
 Some steps, e.g. boolean expressions, allow skipping evaluation of
 certain subexpressions.  In the flat representation this amounts to
 jumping to some later step rather than just continuing consecutively
@@ -174,16 +318,32 @@ with the next step.  The target for such a jump is represented by
 the integer index in the ExprState->steps array of the step to execute
 next.  (Compare the EEO_NEXT and EEO_JUMP macros in execExprInterp.c.)
 
+ブール式などの一部のステップでは、特定の部分式の評価をスキップできます。
+フラット表示では、これは単に次のステップに連続して継続するのではなく、
+後のステップにジャンプすることになります。このようなジャンプのターゲッ
+トは、次に実行するステップのExprState->ステップ配列の整数インデックス
+で表されます。(execExprInterp.cのEEO_NEXTマクロとEEO_JUMPマクロを比較
+してください。)
+
 Typically, ExecInitExprRec() has to push a jumping step into the steps
 array, then recursively generate steps for the subexpression that might
 get skipped over, then go back and fix up the jump target index using
 the now-known length of the subexpression's steps.  This is handled by
 adjust_jumps lists in execExpr.c.
 
+通常、ExecInitExprRec()はsteps配列にジャンプ・ステップをプッシュし、ス
+キップされる可能性のある部分式のステップを再帰的に生成し、戻り、現在わ
+かっている部分式のステップ長を使用してジャンプ・ターゲット・インデック
+スを修正する必要があります。これはexecExpr.cのadjust_jumpsリストで処理
+されます。
+
 The last step in constructing an ExprState is to apply ExecReadyExpr(),
 which readies it for execution using whichever execution method has been
 selected.
 
+ExprStateを作成する最後のステップは、ExecReadyExpr()を適用することです。
+これにより、選択された実行メソッドのいずれかを使用して、実行するための
+準備が行われます。
 
 Expression Evaluation
 ---------------------
@@ -192,11 +352,20 @@ To allow for different methods of expression evaluation, and for
 better branch/jump target prediction, expressions are evaluated by
 calling ExprState->evalfunc (via ExecEvalExpr() and friends).
 
+さまざまな式の評価方法を可能にし、分岐/ジャンプターゲットの予測を改善
+するために、式はExprState->evalfuncを呼び出すことによって評価されます
+(ExecEvalExpr()およびfriendsを介して)。
+
 ExecReadyExpr() can choose the method of interpretation by setting
 evalfunc to an appropriate function.  The default execution function,
 ExecInterpExpr, is implemented in execExprInterp.c; see its header
 comment for details.  Special-case evalfuncs are used for certain
 especially-simple expressions.
+
+ExecReadyExpr()は、evalfuncを適切な関数に設定することによって、解釈の
+方法を選択できます。デフォルトの実行関数であるExecInterpExprは
+execExprInterp.cに実装されています。詳細はヘッダコメントを参照してくだ
+さい。特殊なケースのevalfuncsは、特定の特に単純な式に使用されます。
 
 Note that a lot of the more complex expression evaluation steps, which are
 less performance-critical than the simpler ones, are implemented as
@@ -209,6 +378,15 @@ for the execution of subexpressions; all subexpression results they need
 must be computed by earlier steps.  And dispatch to the following
 expression step must be performed after returning from the helper.
 
+より複雑な式評価ステップの多くは、単純な式評価ステップよりもパフォーマ
+ンスへの影響が少ないため、高速な式実行パスの外部で個別の関数として実装
+されます。これにより、これらの実装を、解釈された式評価とコンパイルされ
+た式評価の間で共有できます。つまり、これらのヘルパー関数は式ステップの
+ディスパッチを実行できません。これは、ディスパッチの方法が呼び出し元に
+よって異なるためです。したがって、ヘルパーは部分式の実行を要求すること
+はできません。必要な部分式の結果はすべて、前の手順で計算する必要があり
+ます。また、ヘルパーから戻った後に、次の式ステップへのディスパッチを実
+行する必要があります。
 
 Targetlist Evaluation
 ---------------------
@@ -222,6 +400,14 @@ and tts_isnull[] array elements of the result slot.  There are special
 fast-path step types (EEOP_ASSIGN_*_VAR) to handle targetlist entries that
 are simple Vars using only one step instead of two.
 
+ExecBuildProjectionInfoは、ターゲットリストをExprState→resultslotに評
+価する効果のあるExprStateを構築します。汎用ターゲットリスト式は、前述
+のように評価し(結果をExprStateのresvalue/resnullフィールドに格納し)、
+EEOP_ASSIGN_TMPステップを使用して結果を結果スロットの適切な
+tts_values[]およびtts_isnull[]配列要素に移動することによって実行されま
+す。2つのステップではなく1つのステップだけを使用する単純なVarであるター
+ゲットリストエントリを処理するために、特別な高速パスステップタイプ
+(EEOP_ASSIGN_*_VAR)があります。
 
 MERGE
 -----
@@ -232,6 +418,13 @@ WHEN NOT MATCHED clauses, each of which specifies one UPDATE, INSERT,
 DELETE, or DO NOTHING actions.  The target table is modified by MERGE,
 and the source relation supplies additional data for the actions.  Each action
 optionally specifies a qualifying expression that is evaluated for each tuple.
+
+MERGEは複数テーブル、複数アクションのコマンドです。ターゲット・テーブ
+ルとソース・リレーションを指定し、複数のWHEN MATCHED句とWHEN NOT
+MATCHED句を含めることができます。各句は1つのUPDATE、INSERT、DELETE、ま
+たはDO NOTHINGアクションを指定します。ターゲットテーブルはMERGEによっ
+て変更され、ソースリレーションはアクションの追加データを提供します。各
+アクションは、各タプルに対して評価される修飾式をオプションで指定します。
 
 In the planner, transform_MERGE_to_join constructs a join between the target
 table and the source relation, with row-identifying junk columns from the target
@@ -247,20 +440,45 @@ NULL, then the matching tuple from the target table can be fetched; qualifying
 expression of each WHEN MATCHED clause is evaluated given both the fetched
 tuple and the tuple returned by the plan.
 
+プランナでは、transform_MERGE_to_joinは対象テーブルとソースリレーショ
+ン間の結合を構成します。対象テーブルからの行を識別するジャンク列があり
+ます。MERGEコマンドにWHEN NOT MATCHED句が含まれている場合、この結合は
+外部結合です。ModifyTableノードは、その結合の計画ツリーからタプルをフェッ
+チします。フェッチされたタプル内の行を識別する列がNULLの場合、ソース・
+リレーションにはターゲット表内のどのタプルとも一致しないタプルが含まれ
+ているため、各WHEN NOT MATCHED句の修飾式は、プランによって戻されたタプ
+ルを考慮して評価されます。式がtrueを返す場合は、句で指定されたアクショ
+ンが実行され、それ以上の句は評価されません。一方、行を識別する列がNULL
+でない場合は、ターゲット表から一致するタプルをフェッチできます。各WHEN
+MATCHED句の修飾式は、フェッチされたタプルと計画によって戻されたタプル
+の両方を考慮して評価されます。
+
 If no WHEN NOT MATCHED clauses are present, then the join constructed by
 the planner is an inner join, and the row-identifying junk columns are
 always non NULL.
+
+WHEN NOT MATCHED句が存在しない場合、プランナによって構築された結合は内
+部結合であり、行を識別するジャンク列は常にNULLではありません。
 
 If WHEN MATCHED ends up processing a row that is concurrently updated or deleted,
 EvalPlanQual (see below) is used to find the latest version of the row, and
 that is re-fetched; if it exists, the search for a matching WHEN MATCHED clause
 to use starts at the top.
 
+WHEN MATCHEDが同時に更新または削除された行を処理することになった場合、
+最新バージョンの行を見つけるためにEvalPlanQual(下記参照)が使用され、再
+フェッチされます。存在する場合、使用する一致するWHEN MATCHED句の検索は
+先頭から開始されます。
+
 MERGE does not allow its own type of triggers, but instead fires UPDATE, DELETE,
 and INSERT triggers: row triggers are fired for each row when an action is
 executed for that row.  Statement triggers are fired always, regardless of
 whether any rows match the corresponding clauses.
 
+MERGEでは、独自のタイプのトリガーは使用できませんが、代わりにUPDATE、
+DELETE、およびINSERTトリガーが起動されます。行トリガーは、各行に対して
+アクションが実行されると、その行に対して起動されます。文トリガは、対応
+する句に一致する行があるかどうかにかかわらず、常に実行されます。
 
 Memory Management
 -----------------
@@ -271,8 +489,18 @@ context or a child context.  This allows easy reclamation of storage
 during executor shutdown --- rather than messing with retail pfree's and
 probable storage leaks, we just destroy the memory context.
 
+"クエリ毎"のメモリコンテキストはCreateExecutorState()中に作成され、エ
+クゼキュータ呼び出し中に割り当てられた全てのストレージはそのコンテキス
+トか子コンテキスト内に割り当てられる。これにより、エクゼキュータのシャッ
+トダウン中にストレージを簡単に再利用することができます---個別のpfreeを
+使ってメモリリークの可能性で混乱させるのではなく、単にメモリコンテキス
+トを破棄するだけです。
+
 In particular, the plan state trees and expression state trees described
 in the previous section are allocated in the per-query memory context.
+
+特に、前のセクションで説明した計画状態ツリーと式状態ツリーは、クエリご
+とのメモリコンテキストで割り当てられます。
 
 To avoid intra-query memory leaks, most processing while a query runs
 is done in "per tuple" memory contexts, which are so-called because they
@@ -280,6 +508,12 @@ are typically reset to empty once per tuple.  Per-tuple contexts are usually
 associated with ExprContexts, and commonly each PlanState node has its own
 ExprContext to evaluate its qual and targetlist expressions in.
 
+クエリ内のメモリリークを回避するために、クエリ実行中のほとんどの処理は
+「タプルごと」のメモリコンテキストで行われます。これは、通常はタプルご
+とに空にリセットされるため、「タプルごと」のメモリコンテキストと呼ばれ
+ます。タプルごとのコンテキストは通常ExprContextsに関連付けられ、一般的
+に各PlanStateノードは独自のExprContextを持って、でのqualとtargetlist式
+を評価します。
 
 Query Processing Control Flow
 -----------------------------
@@ -321,10 +555,20 @@ memory; it'll all go away in FreeExecutorState anyway.  However, we do need to
 be careful to close relations, drop buffer pins, etc, so we do need to scan
 the plan state tree to find these sorts of resources.
 
+上記のコメントによると、ExecEndNodeがメモリを解放することは実際には重
+要ではなく、いずれにしてもFreeExecutorStateではすべて消えてしまいます。
+ただし、密接な関係やドロップバッファピンなどに注意する必要があるため、
+これらの種類のリソースを見つけるには、計画状態ツリーをスキャンする必要
+があります。
 
 The executor can also be used to evaluate simple expressions without any Plan
 tree ("simple" meaning "no aggregates and no sub-selects", though such might
 be hidden inside function calls).  This case has a flow of control like
+
+エクゼキュータは、プランツリーのない単純な式を評価するためにも使用でき
+ます(「単純」とは「集約もサブ選択もない」ことを意味しますが、関数呼び
+出しの中に隠されている場合があります)。こに場合、以下のような制御フロー
+となります。
 
 	CreateExecutorState
 		creates per-query context
@@ -359,6 +603,16 @@ concurrently-committed transaction.  If we are running in SERIALIZABLE
 isolation level then we just raise an error when this condition is seen to
 occur.  In READ COMMITTED isolation level, we must work a lot harder.
 
+単純なSELECTの場合、エクゼキュータは、現在のトランザクションが参照する
+スナップショットに従って有効なタプル(つまり、以前にコミットされたトラ
+ンザクションによって挿入され、以前にコミットされたトランザクションによっ
+て削除されていないタプル)だけに注意を払う必要があります。ただし、
+UPDATEとDELETEでは、開いているトランザクションまたは同時にコミットされ
+たトランザクションによって変更されたタプルを変更または削除するのはクー
+ルではありません。SERIALIZABLE独立性レベルで実行している場合は、この状
+態が発生したときにエラーを発生させるだけです。READ COMMITTED独立性レベ
+ルでは、もっと努力しなければなりません。
+
 The basic idea in READ COMMITTED mode is to take the modified tuple
 committed by the concurrent transaction (after waiting for it to commit,
 if need be) and re-evaluate the query qualifications to see if it would
@@ -367,6 +621,15 @@ doing an UPDATE) from the modified tuple, and finally update/delete the
 modified tuple.  SELECT FOR UPDATE/SHARE behaves similarly, except that its
 action is just to lock the modified tuple and return results based on that
 version of the tuple.
+
+READ COMMITTEDモードの基本的な考え方は、並行トランザクションによってコ
+ミットされた変更済みタプルを取得し(必要に応じてコミットを待機した後)、
+クエリ条件を再評価して、それでも条件を満たすかどうかを確認することです。
+そうであれば、更新されたタプル(UPDATEを実行している場合)を変更されたタ
+プルから再生成し、最後に変更されたタプルを更新/削除します。SELECT FOR
+UPDATE/SHAREも同様に動作しますが、SELECT FOR UPDATE/SHAREの動作は、変
+更されたタプルをロックし、そのバージョンのタプルに基づいて結果を返すだ
+けです。
 
 To implement this checking, we actually re-run the query from scratch for
 each modified tuple (or set of tuples, for SELECT FOR UPDATE), with the
@@ -378,10 +641,25 @@ we're doing UPDATE).  If no tuple is returned, then the modified tuple(s)
 fail the quals, so we ignore the current result tuple and continue the
 original query.
 
+このチェックを実装するために、変更された各タプル(またはSELECT FOR
+UPDATEの場合はタプルのセット)に対してクエリを最初から再実行します。リ
+レーションスキャンノードは、現在のタプル(元のタプル、または変更された
+タプルの更新された(現在ロックされている)バージョン)のみを返すように調
+整されています。このクエリがタプルを返す場合、変更されたタプルはquals
+を渡します(UPDATEを実行している場合、クエリの出力は適切に変更された更
+新タプルです)。タプルが返されない場合、変更されたタプルはqualsに失敗す
+るため、現在の結果タプルを無視して元のクエリを続行します。
+
 In UPDATE/DELETE, only the target relation needs to be handled this way.
 In SELECT FOR UPDATE, there may be multiple relations flagged FOR UPDATE,
 so we obtain lock on the current tuple version in each such relation before
 executing the recheck.
+
+UPDATE/DELETEでは、ターゲットリレーションのみをこの方法で処理する必要
+があります。SELECT FOR UPDATEでは、FOR UPDATEフラグが設定された複数の
+リレーションが存在する可能性があるため、再チェックを実行する前に、この
+ような各リレーションの現在のタプル・バージョンに対するロックを取得しま
+す。
 
 It is also possible that there are relations in the query that are not
 to be locked (they are neither the UPDATE/DELETE target nor specified to
@@ -395,6 +673,17 @@ relations, such as a ValuesScan or FunctionScan.  For these, since there
 is no equivalent of TID, the only practical solution seems to be to include
 the entire row value in the join output row.
 
+また、クエリ内にロックされないリレーションがある可能性もあります(これ
+らはUPDATE/DELETEターゲットでもなく、SELECT FOR UPDATE/SHAREでロックさ
+れるように指定されたものでもありません)。テストクエリを再実行するとき
+は、ロックされた行に結合されたこれらのリレーションの同じ行を使用します。
+通常のリレーションでは、結合出力に行TIDを含めてそのTIDを再フェッチする
+ことで、比較的安価に実装できます。(再フェッチはコストがかかりますが、
+再テストが必要ない通常のケースを最適化しようとしています)。また、
+ValuesScanやFunctionScanなどのテーブル以外のリレーションも考慮する必要
+があります。これらの場合、TIDに相当するものがないため、唯一の実用的な
+解決策は、結合出力行に行値全体を含めることのようです。
+
 We disallow set-returning functions in the targetlist of SELECT FOR UPDATE,
 so as to ensure that at most one tuple can be returned for any particular
 set of scan tuples.  Otherwise we'd get duplicates due to the original
@@ -403,6 +692,13 @@ SRFs are disallowed in an UPDATE's targetlist.  There, they would have the
 effect of the same row being updated multiple times, which is not very
 useful --- and updates after the first would have no effect anyway.
 
+SELECT FOR UPDATEのターゲットリストでは、セットを返す関数を禁止してい
+ます。これは、スキャンタプルの特定のセットに対して、最大1つのタプルを
+返すことができるようにするためです。そうしないと、元のクエリが同じスキャ
+ンタプルのセットを複数回返すため、重複が発生します。同様に、SRFは
+UPDATEのターゲットリストでは許可されません。ここでは、同じ行が複数回更
+新されるという効果がありますが、これはあまり便利ではありません。また、
+最初の行の後で更新しても効果はありません。
 
 Asynchronous Execution
 ----------------------
@@ -417,6 +713,16 @@ immediately.  This is particularly likely to occur when the plan tree contains
 an Append node.  Asynchronous execution runs multiple parts of an Append node
 concurrently rather than serially to improve performance.
 
+ForeignScanがネットワークI/Oを待機している場合など、ノードがデータベー
+ス・システム外部のイベントを待機している場合は、すぐにタプルを戻すこと
+はできないが、後で戻すことができる可能性があることをノードが示すことが
+望ましいです。この種の状況を検出するプロセスは、常に単にブロックするこ
+とによってそれを処理することができますが、これは、計画ツリーの他の部分
+を実行するために費やされる時間を無駄にする可能性があります。この部分で
+は、すぐに進行が行われます。これは特に、計画ツリーに追加ノードが含まれ
+ている場合に発生します。非同期実行では、パフォーマンスを向上させるため
+に、Appendノードの複数の部分がシリアルではなく同時に実行されます。
+
 For asynchronous execution, an Append node must first request a tuple from an
 async-capable child node using ExecAsyncRequest.  Next, it must execute the
 asynchronous event loop using ExecAppendAsyncEventWait.  Eventually, when a
@@ -426,19 +732,51 @@ the current implementation of asynchronous execution, the only node type that
 requests tuples from an async-capable child node is an Append, while the only
 node type that might be async-capable is a ForeignScan.
 
+非同期実行の場合、Appendノードは最初にExecAsyncRequestを使用して非同期
+対応の子ノードからタプルを要求する必要があります。次に、
+ExecAppendAsyncEventWaitを使用して非同期イベント・ループを実行する必要
+があります。最終的に、非同期要求が行われた子ノードがタプルを生成すると、
+AppendノードはExecAsyncResponseを介してイベントループからタプルを受信
+します。非同期実行の現在の実装では、非同期対応の子ノードからタプルを要
+求するノードタイプはAppendだけであり、非同期対応の可能性があるノードタ
+イプはForeignScanだけです。
+
 Typically, the ExecAsyncResponse callback is the only one required for nodes
 that wish to request tuples asynchronously.  On the other hand, async-capable
 nodes generally need to implement three methods:
+
+通常、タプルを非同期に要求するノードに必要なコールバックは
+ExecAsyncResponseコールバックだけです。一方、非同期対応ノードは一般的
+に3つのメソッドを実装する必要があります。
 
 1. When an asynchronous request is made, the node's ExecAsyncRequest callback
    will be invoked; it should use ExecAsyncRequestPending to indicate that the
    request is pending for a callback described below.  Alternatively, it can
    instead use ExecAsyncRequestDone if a result is available immediately.
 
+1. 非同期要求が行われると、ノードのExecAsyncRequestコールバックが呼び
+   出されます。ExecAsyncRequestPendingを使用して、後述するコールバック
+   の要求が保留中であることを示す必要があります。または、結果がすぐに
+   利用可能な場合は、代わりにExecAsyncRequestDoneを使用できます。
+
 2. When the event loop wishes to wait or poll for file descriptor events, the
    node's ExecAsyncConfigureWait callback will be invoked to configure the
    file descriptor event for which the node wishes to wait.
 
+2. イベントループがファイル記述子イベントを待機またはポーリングする場
+   合、ノードのExecAsyncConfigureWaitコールバックが呼び出され、ノード
+   が待機するファイル記述子イベントが設定されます。
+
+
 3. When the file descriptor becomes ready, the node's ExecAsyncNotify callback
    will be invoked; like #1, it should use ExecAsyncRequestPending for another
    callback or ExecAsyncRequestDone to return a result immediately.
+
+3. ファイル記述子が使用可能になると、ノードのExecAsyncNotifyコールバッ
+   クが呼び出されます。#1と同様に、別のコールバックまたは
+   ExecAsyncRequestDoneにExecAsyncRequestPendingを使用してすぐに結果を
+   返す必要があります。
+
+-----------------------------------------------------------
+* 本テキストの翻訳には、みんなの自動翻訳@TexTraを利用しました
+-----------------------------------------------------------
