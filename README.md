@@ -9,7 +9,7 @@ Currently only Japanese translation is available in README_master_ja branch.
   - src/backend/executor/README
   - src/backend/optimizer/README
 
-## What are translations available other than READM?
+## What are translations available other than README?
 
 - Currently following files are available:
   - src/backend/executor/nodeAgg.c (comments in the beginning of the file)
