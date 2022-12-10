@@ -1681,6 +1681,20 @@ build-postgresql:
         </para>
        </listitem>
       </varlistentry>
+
+      <varlistentry>
+       <term><option>--with-segsize-blocks=SEGSIZE_BLOCKS</option></term>
+       <listitem>
+        <para>
+         Specify the segment size in blocks. If both
+         <option>--with-segsize</option> and this option are specified, this
+         option wins.
+
+         This option is only for developers, to test segment related code.
+        </para>
+       </listitem>
+      </varlistentry>
+
      </variablelist>
 
    </sect3>
@@ -2107,6 +2121,12 @@ ninja
     See <xref linkend="regress"/> for
     detailed information about interpreting the test results. You can
     repeat this test at any later time by issuing the same command.
+   </para>
+
+   <para>
+    To run pg_regress and pg_isolation_regress tests against a running
+    postgres instance, specify <userinput>--setup running</userinput> as an
+    argument to <userinput>meson test</userinput>.
    </para>
   </step>
 
@@ -3091,6 +3111,20 @@ ninja install
        </para>
       </listitem>
      </varlistentry>
+
+      <varlistentry>
+       <term><option>-Dsegsize_blocks=SEGSIZE_BLOCKS</option></term>
+       <listitem>
+        <para>
+         Specify the segment size in blocks. If both
+         <option>-Dsegsize</option> and this option are specified, this option
+         wins.
+
+         This option is only for developers, to test segment related code.
+        </para>
+       </listitem>
+      </varlistentry>
+
     </variablelist>
    </sect3>
   </sect2>

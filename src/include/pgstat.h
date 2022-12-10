@@ -278,35 +278,35 @@ typedef struct PgStat_CheckpointerStats
 
 typedef struct PgStat_StatDBEntry
 {
-	PgStat_Counter n_xact_commit;
-	PgStat_Counter n_xact_rollback;
-	PgStat_Counter n_blocks_fetched;
-	PgStat_Counter n_blocks_hit;
-	PgStat_Counter n_tuples_returned;
-	PgStat_Counter n_tuples_fetched;
-	PgStat_Counter n_tuples_inserted;
-	PgStat_Counter n_tuples_updated;
-	PgStat_Counter n_tuples_deleted;
+	PgStat_Counter xact_commit;
+	PgStat_Counter xact_rollback;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
+	PgStat_Counter tuples_returned;
+	PgStat_Counter tuples_fetched;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
 	TimestampTz last_autovac_time;
-	PgStat_Counter n_conflict_tablespace;
-	PgStat_Counter n_conflict_lock;
-	PgStat_Counter n_conflict_snapshot;
-	PgStat_Counter n_conflict_bufferpin;
-	PgStat_Counter n_conflict_startup_deadlock;
-	PgStat_Counter n_temp_files;
-	PgStat_Counter n_temp_bytes;
-	PgStat_Counter n_deadlocks;
-	PgStat_Counter n_checksum_failures;
+	PgStat_Counter conflict_tablespace;
+	PgStat_Counter conflict_lock;
+	PgStat_Counter conflict_snapshot;
+	PgStat_Counter conflict_bufferpin;
+	PgStat_Counter conflict_startup_deadlock;
+	PgStat_Counter temp_files;
+	PgStat_Counter temp_bytes;
+	PgStat_Counter deadlocks;
+	PgStat_Counter checksum_failures;
 	TimestampTz last_checksum_failure;
-	PgStat_Counter n_block_read_time;	/* times in microseconds */
-	PgStat_Counter n_block_write_time;
-	PgStat_Counter n_sessions;
-	PgStat_Counter total_session_time;
-	PgStat_Counter total_active_time;
-	PgStat_Counter total_idle_in_xact_time;
-	PgStat_Counter n_sessions_abandoned;
-	PgStat_Counter n_sessions_fatal;
-	PgStat_Counter n_sessions_killed;
+	PgStat_Counter blk_read_time;	/* times in microseconds */
+	PgStat_Counter blk_write_time;
+	PgStat_Counter sessions;
+	PgStat_Counter session_time;
+	PgStat_Counter active_time;
+	PgStat_Counter idle_in_transaction_time;
+	PgStat_Counter sessions_abandoned;
+	PgStat_Counter sessions_fatal;
+	PgStat_Counter sessions_killed;
 
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatDBEntry;
@@ -364,22 +364,22 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter tuples_deleted;
 	PgStat_Counter tuples_hot_updated;
 
-	PgStat_Counter n_live_tuples;
-	PgStat_Counter n_dead_tuples;
-	PgStat_Counter changes_since_analyze;
-	PgStat_Counter inserts_since_vacuum;
+	PgStat_Counter live_tuples;
+	PgStat_Counter dead_tuples;
+	PgStat_Counter mod_since_analyze;
+	PgStat_Counter ins_since_vacuum;
 
 	PgStat_Counter blocks_fetched;
 	PgStat_Counter blocks_hit;
 
-	TimestampTz vacuum_timestamp;	/* user initiated vacuum */
+	TimestampTz last_vacuum_time;	/* user initiated vacuum */
 	PgStat_Counter vacuum_count;
-	TimestampTz autovac_vacuum_timestamp;	/* autovacuum initiated */
-	PgStat_Counter autovac_vacuum_count;
-	TimestampTz analyze_timestamp;	/* user initiated */
+	TimestampTz last_autovacuum_time;	/* autovacuum initiated */
+	PgStat_Counter autovacuum_count;
+	TimestampTz last_analyze_time;	/* user initiated */
 	PgStat_Counter analyze_count;
-	TimestampTz autovac_analyze_timestamp;	/* autovacuum initiated */
-	PgStat_Counter autovac_analyze_count;
+	TimestampTz last_autoanalyze_time;	/* autovacuum initiated */
+	PgStat_Counter autoanalyze_count;
 } PgStat_StatTabEntry;
 
 typedef struct PgStat_WalStats

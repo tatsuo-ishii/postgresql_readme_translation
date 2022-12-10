@@ -70,10 +70,13 @@ typedef struct PlannedStmt
 
 	struct Plan *planTree;		/* tree of Plan nodes */
 
-	List	   *partPruneInfos;	/* List of PartitionPruneInfo contained in
-								 * the plan */
+	List	   *partPruneInfos; /* List of PartitionPruneInfo contained in the
+								 * plan */
 
 	List	   *rtable;			/* list of RangeTblEntry nodes */
+
+	List	   *permInfos;		/* list of RTEPermissionInfo nodes for rtable
+								 * entries needing one */
 
 	/* rtable indexes of target relations for INSERT/UPDATE/DELETE/MERGE */
 	List	   *resultRelations;	/* integer list of RT indexes, or NIL */

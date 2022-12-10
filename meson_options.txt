@@ -13,6 +13,9 @@ option('wal_blocksize', type : 'combo',
 option('segsize', type : 'integer', value : 1,
   description : '''Segment size, in gigabytes''')
 
+option('segsize_blocks', type : 'integer', value: 0,
+  description : '''Segment size, in blocks''')
+
 
 # Miscellaneous options
 
@@ -171,6 +174,9 @@ option('PYTHON', type : 'array', value: ['python3', 'python'],
 
 option('SED', type : 'string', value: 'gsed',
   description: 'path to sed binary')
+
+option('STRIP', type : 'string', value: 'strip',
+  description: 'path to strip binary, used for PGXS emulation')
 
 option('TAR', type : 'string', value: 'tar',
   description: 'path to tar binary')

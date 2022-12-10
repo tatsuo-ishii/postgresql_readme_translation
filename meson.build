@@ -143,12 +143,11 @@ cdata.set_quoted('PACKAGE_TARNAME', 'postgresql')
 
 pg_version += get_option('extra_version')
 cdata.set_quoted('PG_VERSION', pg_version)
-cdata.set_quoted('PG_VERSION_STR', 'PostgreSQL @0@ on @1@, compiled by @2@-@3@'.format(
-  pg_version, build_machine.cpu_family(), cc.get_id(), cc.version()))
 cdata.set_quoted('PG_MAJORVERSION', pg_version_major.to_string())
 cdata.set('PG_MAJORVERSION_NUM', pg_version_major)
 cdata.set('PG_MINORVERSION_NUM', pg_version_minor)
 cdata.set('PG_VERSION_NUM', pg_version_num)
+# PG_VERSION_STR is built later, it depends compiler test results
 cdata.set_quoted('CONFIGURE_ARGS', '')
 
 
@@ -211,6 +210,10 @@ if host_system == 'aix'
 
 elif host_system == 'cygwin'
   cppflags += '-D_GNU_SOURCE'
+  dlsuffix = '.dll'
+  mod_link_args_fmt = ['@0@']
+  mod_link_with_name = 'lib@0@.exe.a'
+  mod_link_with_dir = 'libdir'
 
 elif host_system == 'darwin'
   dlsuffix = '.dylib'
@@ -333,9 +336,6 @@ program_zstd = find_program(get_option('ZSTD'), native: true, required: false)
 dtrace = find_program(get_option('DTRACE'), native: true, required: get_option('dtrace'))
 missing = find_program('config/missing', native: true)
 
-# used by PGXS
-install_sh = find_program('config/install-sh', native: true)
-
 bison_flags = []
 if bison.found()
   bison_version_c = run_command(bison, '--version', check: true)
@@ -418,7 +418,19 @@ meson_bin = find_program(meson_binpath, native: true)
 
 cdata.set('USE_ASSERT_CHECKING', get_option('cassert') ? 1 : false)
 
-cdata.set('BLCKSZ', get_option('blocksize').to_int() * 1024, description:
+blocksize = get_option('blocksize').to_int() * 1024
+
+if get_option('segsize_blocks') != 0
+  if get_option('segsize') != 1
+    warning('both segsize and segsize_blocks specified, segsize_blocks wins')
+  endif
+
+  segsize = get_option('segsize_blocks')
+else
+  segsize = (get_option('segsize') * 1024 * 1024 * 1024) / blocksize
+endif
+
+cdata.set('BLCKSZ', blocksize, description:
 '''Size of a disk block --- this also limits the size of a tuple. You can set
    it bigger if you need bigger tuples (although TOAST should reduce the need
    to have large tuples, since fields can be spread across multiple tuples).
@@ -428,7 +440,7 @@ cdata.set('BLCKSZ', get_option('blocksize').to_int() * 1024, description:
    Changing BLCKSZ requires an initdb.''')
 
 cdata.set('XLOG_BLCKSZ', get_option('wal_blocksize').to_int() * 1024)
-cdata.set('RELSEG_SIZE', get_option('segsize') * 131072)
+cdata.set('RELSEG_SIZE', segsize)
 cdata.set('DEF_PGPORT', get_option('pgport'))
 cdata.set_quoted('DEF_PGPORT_STR', get_option('pgport').to_string())
 cdata.set_quoted('PG_KRB_SRVNAM', get_option('krb_srvnam'))
@@ -1737,11 +1749,10 @@ endif
 
 # A few places with imported code get a pass on -Wdeclaration-after-statement, remember
 # the result for them
+cflags_no_decl_after_statement = []
 if cc.has_argument('-Wdeclaration-after-statement')
   cflags_warn += '-Wdeclaration-after-statement'
-  using_declaration_after_statement_warning = true
-else
-  using_declaration_after_statement_warning = false
+  cflags_no_decl_after_statement += '-Wno-declaration-after-statement'
 endif
 
 
@@ -2310,8 +2321,8 @@ gnugetopt_dep = cc.find_library('gnugetopt', required: false)
 #   (i.e., allow '-' as a flag character), so use our version on those platforms
 # - We want to use system's getopt_long() only if the system provides struct
 #   option
-always_replace_getopt = host_system in ['windows', 'openbsd', 'solaris']
-always_replace_getopt_long = host_system == 'windows' or not cdata.has('HAVE_STRUCT_OPTION')
+always_replace_getopt = host_system in ['windows', 'cygwin', 'openbsd', 'solaris']
+always_replace_getopt_long = host_system in ['windows', 'cygwin'] or not cdata.has('HAVE_STRUCT_OPTION')
 
 # Required on BSDs
 execinfo_dep = cc.find_library('execinfo', required: false)
@@ -2439,6 +2450,15 @@ cdata.set('USE_@0@_SEMAPHORES'.format(sema_kind.to_upper()), 1)
 
 cdata.set('MEMSET_LOOP_LIMIT', memset_loop_limit)
 cdata.set_quoted('DLSUFFIX', dlsuffix)
+
+
+# built later than the rest of the version metadata, we need SIZEOF_VOID_P
+cdata.set_quoted('PG_VERSION_STR',
+  'PostgreSQL @0@ on @1@-@2@, compiled by @3@-@4@, @5@-bit'.format(
+    pg_version, host_machine.cpu_family(), host_system,
+    cc.get_id(), cc.version(), cdata.get('SIZEOF_VOID_P') * 8,
+  )
+)
 
 
 
@@ -2920,6 +2940,20 @@ endif
 # Test Generation
 ###############################################################
 
+# When using a meson version understanding exclude_suites, define a
+# 'tmp_install' test setup (the default) that excludes tests running against a
+# pre-existing install and a 'running' setup that conflicts with creation of
+# the temporary installation and tap tests (which don't support running
+# against a running server).
+
+running_suites = []
+install_suites = []
+if meson.version().version_compare('>=0.57')
+  runningcheck = true
+else
+  runningcheck = false
+endif
+
 testwrap = files('src/tools/testwrap')
 
 foreach test_dir : tests
@@ -2927,7 +2961,6 @@ foreach test_dir : tests
     testwrap,
     '--basedir', meson.build_root(),
     '--srcdir', test_dir['sd'],
-    '--testgroup', test_dir['name'],
   ]
 
   foreach kind, v : test_dir
@@ -2940,55 +2973,94 @@ foreach test_dir : tests
     if kind in ['regress', 'isolation', 'ecpg']
       if kind == 'regress'
         runner = pg_regress
+        fallback_dbname = 'regression_@0@'
       elif kind == 'isolation'
         runner = pg_isolation_regress
+        fallback_dbname = 'isolation_regression_@0@'
       elif kind == 'ecpg'
         runner = pg_regress_ecpg
+        fallback_dbname = 'ecpg_regression_@0@'
       endif
 
-      test_output = test_result_dir / test_dir['name'] / kind
+      test_group = test_dir['name']
+      test_group_running = test_dir['name'] + '-running'
 
-      test_command = [
+      test_output = test_result_dir / test_group / kind
+      test_output_running = test_result_dir / test_group_running/ kind
+
+      # Unless specified by the test, choose a non-conflicting database name,
+      # to avoid conflicts when running against existing server.
+      dbname = t.get('dbname',
+        fallback_dbname.format(test_dir['name']))
+
+      test_command_base = [
         runner.full_path(),
         '--inputdir', t.get('inputdir', test_dir['sd']),
         '--expecteddir', t.get('expecteddir', test_dir['sd']),
-        '--outputdir', test_output,
-        '--temp-instance', test_output / 'tmp_check',
         '--bindir', '',
         '--dlpath', test_dir['bd'],
         '--max-concurrent-tests=20',
-        '--port', testport.to_string(),
+        '--dbname', dbname,
       ] + t.get('regress_args', [])
 
+      test_selection = []
       if t.has_key('schedule')
-        test_command += ['--schedule', t['schedule'],]
+        test_selection += ['--schedule', t['schedule'],]
       endif
 
       if kind == 'isolation'
-        test_command += t.get('specs', [])
+        test_selection += t.get('specs', [])
       else
-        test_command += t.get('sql', [])
+        test_selection += t.get('sql', [])
       endif
 
       env = test_env
       env.prepend('PATH', temp_install_bindir, test_dir['bd'])
 
       test_kwargs = {
-        'suite': [test_dir['name']],
         'priority': 10,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
         'env': env,
       } + t.get('test_kwargs', {})
 
-      test(test_dir['name'] / kind,
+      test(test_group / kind,
         python,
-        args: testwrap_base + [
+        args: [
+          testwrap_base,
+          '--testgroup', test_group,
           '--testname', kind,
-          '--', test_command,
+          '--',
+          test_command_base,
+          '--outputdir', test_output,
+          '--temp-instance', test_output / 'tmp_check',
+          '--port', testport.to_string(),
+          test_selection,
         ],
+        suite: test_group,
         kwargs: test_kwargs,
       )
+      install_suites += test_group
+
+      # some tests can't support running against running DB
+      if runningcheck and t.get('runningcheck', true)
+        test(test_group_running / kind,
+          python,
+          args: [
+            testwrap_base,
+            '--testgroup', test_group_running,
+            '--testname', kind,
+            '--',
+            test_command_base,
+            '--outputdir', test_output_running,
+            test_selection,
+          ],
+          is_parallel: t.get('runningcheck-parallel', true),
+          suite: test_group_running,
+          kwargs: test_kwargs,
+        )
+        running_suites += test_group_running
+      endif
 
       testport += 1
     elif kind == 'tap'
@@ -3011,9 +3083,10 @@ foreach test_dir : tests
         env.set(name, value)
       endforeach
 
+      test_group = test_dir['name']
       test_kwargs = {
         'protocol': 'tap',
-        'suite': [test_dir['name']],
+        'suite': test_group,
         'timeout': 1000,
         'depends': test_deps + t.get('deps', []),
         'env': env,
@@ -3033,12 +3106,14 @@ foreach test_dir : tests
           python,
           kwargs: test_kwargs,
           args: testwrap_base + [
+            '--testgroup', test_dir['name'],
             '--testname', onetap_p,
             '--', test_command,
             test_dir['sd'] / onetap,
           ],
         )
       endforeach
+      install_suites += test_group
     else
       error('unknown kind @0@ of test in @1@'.format(kind, test_dir['sd']))
     endif
@@ -3047,6 +3122,14 @@ foreach test_dir : tests
 
 endforeach # directories with tests
 
+# repeat condition so meson realizes version dependency
+if meson.version().version_compare('>=0.57')
+  add_test_setup('tmp_install',
+    is_default: true,
+    exclude_suites: running_suites)
+  add_test_setup('running',
+    exclude_suites: ['setup'] + install_suites)
+endif
 
 
 ###############################################################
@@ -3069,9 +3152,11 @@ if meson.version().version_compare('>=0.57')
 
   summary(
     {
-      'data block size': cdata.get('BLCKSZ'),
-      'WAL block size': cdata.get('XLOG_BLCKSZ') / 1024,
-      'segment size': cdata.get('RELSEG_SIZE') / 131072,
+      'data block size': '@0@ kB'.format(cdata.get('BLCKSZ') / 1024),
+      'WAL block size': '@0@ kB'.format(cdata.get('XLOG_BLCKSZ') / 1024),
+      'segment size': get_option('segsize_blocks') != 0 ?
+        '@0@ blocks'.format(cdata.get('RELSEG_SIZE')) :
+        '@0@ GB'.format(get_option('segsize')),
     },
     section: 'Data layout',
   )

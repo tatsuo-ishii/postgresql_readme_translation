@@ -3979,12 +3979,30 @@ reparameterize_path(PlannerInfo *root, Path *path,
 									   apath->path.parallel_aware,
 									   -1);
 			}
+		case T_Material:
+			{
+				MaterialPath *mpath = (MaterialPath *) path;
+				Path	   *spath = mpath->subpath;
+
+				spath = reparameterize_path(root, spath,
+											required_outer,
+											loop_count);
+				if (spath == NULL)
+					return NULL;
+				return (Path *) create_material_path(rel, spath);
+			}
 		case T_Memoize:
 			{
 				MemoizePath *mpath = (MemoizePath *) path;
+				Path	   *spath = mpath->subpath;
 
+				spath = reparameterize_path(root, spath,
+											required_outer,
+											loop_count);
+				if (spath == NULL)
+					return NULL;
 				return (Path *) create_memoize_path(root, rel,
-													mpath->subpath,
+													spath,
 													mpath->param_exprs,
 													mpath->hash_operators,
 													mpath->singlerow,
@@ -4013,7 +4031,8 @@ reparameterize_path(PlannerInfo *root, Path *path,
  * path->parent, which does not change during the translation. Hence those
  * members are copied as they are.
  *
- * If the given path can not be reparameterized, the function returns NULL.
+ * Currently, only a few path types are supported here, though more could be
+ * added at need.  We return NULL if we can't reparameterize the given path.
  */
 Path *
 reparameterize_path_by_child(PlannerInfo *root, Path *path,
@@ -4211,12 +4230,23 @@ do { \
 			}
 			break;
 
+		case T_MaterialPath:
+			{
+				MaterialPath *mpath;
+
+				FLAT_COPY_PATH(mpath, path, MaterialPath);
+				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+				new_path = (Path *) mpath;
+			}
+			break;
+
 		case T_MemoizePath:
 			{
 				MemoizePath *mpath;
 
 				FLAT_COPY_PATH(mpath, path, MemoizePath);
 				REPARAMETERIZE_CHILD_PATH(mpath->subpath);
+				ADJUST_CHILD_ATTRS(mpath->param_exprs);
 				new_path = (Path *) mpath;
 			}
 			break;

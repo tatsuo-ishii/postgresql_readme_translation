@@ -285,15 +285,31 @@ AC_DEFINE_UNQUOTED([BLCKSZ], ${BLCKSZ}, [
 #
 # Relation segment size
 #
-AC_MSG_CHECKING([for segment size])
 PGAC_ARG_REQ(with, segsize, [SEGSIZE], [set table segment size in GB [1]],
              [segsize=$withval],
              [segsize=1])
-# this expression is set up to avoid unnecessary integer overflow
-# blocksize is already guaranteed to be a factor of 1024
-RELSEG_SIZE=`expr '(' 1024 / ${blocksize} ')' '*' ${segsize} '*' 1024`
-test $? -eq 0 || exit 1
-AC_MSG_RESULT([${segsize}GB])
+PGAC_ARG_REQ(with, segsize-blocks, [SEGSIZE_BLOCKS], [set table segment size in blocks [0]],
+             [segsize_blocks=$withval],
+             [segsize_blocks=0])
+
+# If --with-segsize-blocks is non-zero, it is used, --with-segsize
+# otherwise. segsize-blocks is only really useful for developers wanting to
+# test segment related code. Warn if both are used.
+if test $segsize_blocks -ne 0 -a $segsize -ne 1; then
+  AC_MSG_WARN([both --with-segsize and --with-segsize-blocks specified, --with-segsize-blocks wins])
+fi
+
+AC_MSG_CHECKING([for segment size])
+if test $segsize_blocks -eq 0; then
+  # this expression is set up to avoid unnecessary integer overflow
+  # blocksize is already guaranteed to be a factor of 1024
+  RELSEG_SIZE=`expr '(' 1024 / ${blocksize} ')' '*' ${segsize} '*' 1024`
+  test $? -eq 0 || exit 1
+  AC_MSG_RESULT([${segsize}GB])
+else
+  RELSEG_SIZE=$segsize_blocks
+  AC_MSG_RESULT([${RELSEG_SIZE} blocks])
+fi
 
 AC_DEFINE_UNQUOTED([RELSEG_SIZE], ${RELSEG_SIZE}, [
  RELSEG_SIZE is the maximum number of blocks allowed in one disk file.
@@ -1131,8 +1147,6 @@ LDFLAGS="$LDFLAGS $LIBDIRS"
 AC_ARG_VAR(LDFLAGS_EX, [extra linker flags for linking executables only])
 AC_ARG_VAR(LDFLAGS_SL, [extra linker flags for linking shared libraries only])
 
-PGAC_PROG_LD
-AC_SUBST(with_gnu_ld)
 PGAC_CHECK_STRIP
 AC_CHECK_TOOL(AR, ar, ar)
 if test "$PORTNAME" = "win32"; then
@@ -1735,9 +1749,11 @@ fi
 dnl Check for largefile support (must be after AC_SYS_LARGEFILE)
 AC_CHECK_SIZEOF([off_t])
 
-# If we don't have largefile support, can't handle segsize >= 2GB.
-if test "$ac_cv_sizeof_off_t" -lt 8 -a "$segsize" != "1"; then
-   AC_MSG_ERROR([Large file support is not enabled. Segment size cannot be larger than 1GB.])
+# If we don't have largefile support, can't handle segment size >= 2GB.
+if test "$ac_cv_sizeof_off_t" -lt 8; then
+  if expr $RELSEG_SIZE '*' $blocksize '>=' 2 '*' 1024 '*' 1024; then
+    AC_MSG_ERROR([Large file support is not enabled. Segment size cannot be larger than 1GB.])
+  fi
 fi
 
 AC_CHECK_SIZEOF([bool], [],
@@ -2371,6 +2387,12 @@ elif test "$PORTNAME" = "openbsd"; then
 else
   PGAC_PROG_CC_LDFLAGS_OPT([-Wl,--as-needed], $link_test_func)
 fi
+
+# For linkers that understand --export-dynamic, add that to the LDFLAGS_EX_BE
+# (backend specific ldflags). One some platforms this will always fail (e.g.,
+# windows), but on others it depends on the choice of linker (e.g., solaris).
+PGAC_PROG_CC_LD_VARFLAGS_OPT(LDFLAGS_EX_BE, [-Wl,--export-dynamic], $link_test_func)
+AC_SUBST(LDFLAGS_EX_BE)
 
 # Create compiler version string
 if test x"$GCC" = x"yes" ; then
