@@ -4,7 +4,7 @@
  *	  POSTGRES table access method definitions.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/tableam.h
@@ -1634,7 +1634,7 @@ table_relation_copy_data(Relation rel, const RelFileLocator *newrlocator)
  *   in that index's order; if false and OldIndex is InvalidOid, no sorting is
  *   performed
  * - OldIndex - see use_sort
- * - OldestXmin - computed by vacuum_set_xid_limits(), even when
+ * - OldestXmin - computed by vacuum_get_cutoffs(), even when
  *   not needed for the relation's AM
  * - *xid_cutoff - ditto
  * - *multi_cutoff - ditto

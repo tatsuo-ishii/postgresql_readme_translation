@@ -2293,7 +2293,7 @@ SELECT t1."C 1" FROM "S 1"."T 1" t1, LATERAL (SELECT DISTINCT t2.c1, t3.c1 FROM 
                ->  Subquery Scan on q
                      ->  HashAggregate
                            Output: t2.c1, t3.c1
-                           Group Key: t2.c1, t3.c1
+                           Group Key: t2.c1
                            ->  Foreign Scan
                                  Output: t2.c1, t3.c1
                                  Relations: (public.ft1 t2) INNER JOIN (public.ft2 t3)
@@ -2606,7 +2606,7 @@ SELECT t1.c1, t2.c2 FROM v4 t1 LEFT JOIN v5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1
  Foreign Scan
    Output: ft4.c1, ft5.c2, ft5.c1
    Relations: (public.ft4) LEFT JOIN (public.ft5)
-   Remote SQL: SELECT r6.c1, r9.c2, r9.c1 FROM ("S 1"."T 3" r6 LEFT JOIN "S 1"."T 4" r9 ON (((r6.c1 = r9.c1)))) ORDER BY r6.c1 ASC NULLS LAST, r9.c1 ASC NULLS LAST LIMIT 10::bigint OFFSET 10::bigint
+   Remote SQL: SELECT r4.c1, r5.c2, r5.c1 FROM ("S 1"."T 3" r4 LEFT JOIN "S 1"."T 4" r5 ON (((r4.c1 = r5.c1)))) ORDER BY r4.c1 ASC NULLS LAST, r5.c1 ASC NULLS LAST LIMIT 10::bigint OFFSET 10::bigint
 (4 rows)
 
 SELECT t1.c1, t2.c2 FROM v4 t1 LEFT JOIN v5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
@@ -2669,7 +2669,7 @@ SELECT t1.c1, t2.c2 FROM v4 t1 LEFT JOIN ft5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c
  Foreign Scan
    Output: ft4.c1, t2.c2, t2.c1
    Relations: (public.ft4) LEFT JOIN (public.ft5 t2)
-   Remote SQL: SELECT r6.c1, r2.c2, r2.c1 FROM ("S 1"."T 3" r6 LEFT JOIN "S 1"."T 4" r2 ON (((r6.c1 = r2.c1)))) ORDER BY r6.c1 ASC NULLS LAST, r2.c1 ASC NULLS LAST LIMIT 10::bigint OFFSET 10::bigint
+   Remote SQL: SELECT r4.c1, r2.c2, r2.c1 FROM ("S 1"."T 3" r4 LEFT JOIN "S 1"."T 4" r2 ON (((r4.c1 = r2.c1)))) ORDER BY r4.c1 ASC NULLS LAST, r2.c1 ASC NULLS LAST LIMIT 10::bigint OFFSET 10::bigint
 (4 rows)
 
 SELECT t1.c1, t2.c2 FROM v4 t1 LEFT JOIN ft5 t2 ON (t1.c1 = t2.c1) ORDER BY t1.c1, t2.c1 OFFSET 10 LIMIT 10;
@@ -2796,6 +2796,7 @@ select c2/2, sum(c2) * (c2/2) from ft1 group by c2/2 order by c2/2;
 (5 rows)
 
 -- Aggregates in subquery are pushed down.
+set enable_incremental_sort = off;
 explain (verbose, costs off)
 select count(x.a), sum(x.a) from (select c2 a, sum(c1) b from ft1 group by c2, sqrt(c1) order by 1, 2) x;
                                                                  QUERY PLAN                                                                  
@@ -2814,6 +2815,7 @@ select count(x.a), sum(x.a) from (select c2 a, sum(c1) b from ft1 group by c2, s
   1000 | 4500
 (1 row)
 
+reset enable_incremental_sort;
 -- Aggregate is still pushed down by taking unshippable expression out
 explain (verbose, costs off)
 select c2 * (random() <= 1)::int as sum1, sum(c1) * c2 as sum2 from ft1 group by c2 order by 1, 2;
@@ -2862,16 +2864,13 @@ select c2 * (random() <= 1)::int as c2 from ft2 group by c2 * (random() <= 1)::i
 -- GROUP BY clause in various forms, cardinal, alias and constant expression
 explain (verbose, costs off)
 select count(c2) w, c2 x, 5 y, 7.0 z from ft1 group by 2, y, 9.0::int order by 2;
-                                      QUERY PLAN                                       
----------------------------------------------------------------------------------------
- Sort
+                                                 QUERY PLAN                                                 
+------------------------------------------------------------------------------------------------------------
+ Foreign Scan
    Output: (count(c2)), c2, 5, 7.0, 9
-   Sort Key: ft1.c2
-   ->  Foreign Scan
-         Output: (count(c2)), c2, 5, 7.0, 9
-         Relations: Aggregate on (public.ft1)
-         Remote SQL: SELECT count(c2), c2, 5, 7.0, 9 FROM "S 1"."T 1" GROUP BY 2, 3, 5
-(7 rows)
+   Relations: Aggregate on (public.ft1)
+   Remote SQL: SELECT count(c2), c2, 5, 7.0, 9 FROM "S 1"."T 1" GROUP BY 2, 3, 5 ORDER BY c2 ASC NULLS LAST
+(4 rows)
 
 select count(c2) w, c2 x, 5 y, 7.0 z from ft1 group by 2, y, 9.0::int order by 2;
   w  | x | y |  z  
@@ -2988,14 +2987,13 @@ select exists(select 1 from pg_enum), sum(c1) from ft1 group by 1;
                     QUERY PLAN                     
 ---------------------------------------------------
  GroupAggregate
-   Output: ($0), sum(ft1.c1)
-   Group Key: $0
+   Output: $0, sum(ft1.c1)
    InitPlan 1 (returns $0)
      ->  Seq Scan on pg_catalog.pg_enum
    ->  Foreign Scan on public.ft1
-         Output: $0, ft1.c1
+         Output: ft1.c1
          Remote SQL: SELECT "C 1" FROM "S 1"."T 1"
-(8 rows)
+(7 rows)
 
 select exists(select 1 from pg_enum), sum(c1) from ft1 group by 1;
  exists |  sum   
@@ -3380,14 +3378,13 @@ select array_agg(c1 order by c1 using operator(public.<^)) from ft2 where c2 = 6
 --------------------------------------------------------------------------------------------------
  GroupAggregate
    Output: array_agg(c1 ORDER BY c1 USING <^ NULLS LAST), c2
-   Group Key: ft2.c2
    ->  Sort
-         Output: c2, c1
+         Output: c1, c2
          Sort Key: ft2.c1 USING <^
          ->  Foreign Scan on public.ft2
-               Output: c2, c1
+               Output: c1, c2
                Remote SQL: SELECT "C 1", c2 FROM "S 1"."T 1" WHERE (("C 1" < 100)) AND ((c2 = 6))
-(9 rows)
+(8 rows)
 
 -- This should not be pushed either.
 explain (verbose, costs off)
@@ -3456,14 +3453,13 @@ select array_agg(c1 order by c1 using operator(public.<^)) from ft2 where c2 = 6
 --------------------------------------------------------------------------------------------------
  GroupAggregate
    Output: array_agg(c1 ORDER BY c1 USING <^ NULLS LAST), c2
-   Group Key: ft2.c2
    ->  Sort
-         Output: c2, c1
+         Output: c1, c2
          Sort Key: ft2.c1 USING <^
          ->  Foreign Scan on public.ft2
-               Output: c2, c1
+               Output: c1, c2
                Remote SQL: SELECT "C 1", c2 FROM "S 1"."T 1" WHERE (("C 1" < 100)) AND ((c2 = 6))
-(9 rows)
+(8 rows)
 
 -- Cleanup
 drop operator class my_op_class using btree;
@@ -6555,10 +6551,10 @@ CREATE VIEW rw_view AS SELECT * FROM foreign_tbl
  a      | integer |           |          |         | plain   | 
  b      | integer |           |          |         | plain   | 
 View definition:
- SELECT foreign_tbl.a,
-    foreign_tbl.b
+ SELECT a,
+    b
    FROM foreign_tbl
-  WHERE foreign_tbl.a < foreign_tbl.b;
+  WHERE a < b;
 Options: check_option=cascaded
 
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -6672,10 +6668,10 @@ CREATE VIEW rw_view AS SELECT * FROM parent_tbl
  a      | integer |           |          |         | plain   | 
  b      | integer |           |          |         | plain   | 
 View definition:
- SELECT parent_tbl.a,
-    parent_tbl.b
+ SELECT a,
+    b
    FROM parent_tbl
-  WHERE parent_tbl.a < parent_tbl.b;
+  WHERE a < b;
 Options: check_option=cascaded
 
 EXPLAIN (VERBOSE, COSTS OFF)
@@ -6766,6 +6762,42 @@ DROP TRIGGER row_before_insupd_trigger ON child_tbl;
 DROP TABLE parent_tbl CASCADE;
 NOTICE:  drop cascades to view rw_view
 DROP FUNCTION row_before_insupd_trigfunc;
+-- Try a more complex permutation of WCO where there are multiple levels of
+-- partitioned tables with columns not all in the same order
+CREATE TABLE parent_tbl (a int, b text, c numeric) PARTITION BY RANGE(a);
+CREATE TABLE sub_parent (c numeric, a int, b text) PARTITION BY RANGE(a);
+ALTER TABLE parent_tbl ATTACH PARTITION sub_parent FOR VALUES FROM (1) TO (10);
+CREATE TABLE child_local (b text, c numeric, a int);
+CREATE FOREIGN TABLE child_foreign (b text, c numeric, a int)
+  SERVER loopback OPTIONS (table_name 'child_local');
+ALTER TABLE sub_parent ATTACH PARTITION child_foreign FOR VALUES FROM (1) TO (10);
+CREATE VIEW rw_view AS SELECT * FROM parent_tbl WHERE a < 5 WITH CHECK OPTION;
+INSERT INTO parent_tbl (a) VALUES(1),(5);
+EXPLAIN (VERBOSE, COSTS OFF)
+UPDATE rw_view SET b = 'text', c = 123.456;
+                                           QUERY PLAN                                            
+-------------------------------------------------------------------------------------------------
+ Update on public.parent_tbl
+   Foreign Update on public.child_foreign parent_tbl_1
+     Remote SQL: UPDATE public.child_local SET b = $2, c = $3 WHERE ctid = $1 RETURNING a
+   ->  Foreign Scan on public.child_foreign parent_tbl_1
+         Output: 'text'::text, 123.456, parent_tbl_1.tableoid, parent_tbl_1.ctid, parent_tbl_1.*
+         Remote SQL: SELECT b, c, a, ctid FROM public.child_local WHERE ((a < 5)) FOR UPDATE
+(6 rows)
+
+UPDATE rw_view SET b = 'text', c = 123.456;
+SELECT * FROM parent_tbl ORDER BY a;
+ a |  b   |    c    
+---+------+---------
+ 1 | text | 123.456
+ 5 |      |        
+(2 rows)
+
+DROP VIEW rw_view;
+DROP TABLE child_local;
+DROP FOREIGN TABLE child_foreign;
+DROP TABLE sub_parent;
+DROP TABLE parent_tbl;
 -- ===================================================================
 -- test serial columns (ie, sequence-based defaults)
 -- ===================================================================
@@ -10345,8 +10377,12 @@ SELECT COUNT(*) FROM batch_table;
     66
 (1 row)
 
--- Check that enabling batched inserts doesn't interfere with cross-partition
--- updates
+-- Clean up
+DROP TABLE batch_table;
+DROP TABLE batch_table_p0;
+DROP TABLE batch_table_p1;
+-- Check that batched mode also works for some inserts made during
+-- cross-partition updates
 CREATE TABLE batch_cp_upd_test (a int) PARTITION BY LIST (a);
 CREATE TABLE batch_cp_upd_test1 (LIKE batch_cp_upd_test);
 CREATE FOREIGN TABLE batch_cp_upd_test1_f
@@ -10354,21 +10390,59 @@ CREATE FOREIGN TABLE batch_cp_upd_test1_f
 	FOR VALUES IN (1)
 	SERVER loopback
 	OPTIONS (table_name 'batch_cp_upd_test1', batch_size '10');
-CREATE TABLE batch_cp_up_test1 PARTITION OF batch_cp_upd_test
+CREATE TABLE batch_cp_upd_test2 PARTITION OF batch_cp_upd_test
 	FOR VALUES IN (2);
-INSERT INTO batch_cp_upd_test VALUES (1), (2);
--- The following moves a row from the local partition to the foreign one
-UPDATE batch_cp_upd_test t SET a = 1 FROM (VALUES (1), (2)) s(a) WHERE t.a = s.a;
-ERROR:  cannot route tuples into foreign table to be updated "batch_cp_upd_test1_f"
-SELECT tableoid::regclass, * FROM batch_cp_upd_test;
+CREATE TABLE batch_cp_upd_test3 (LIKE batch_cp_upd_test);
+CREATE FOREIGN TABLE batch_cp_upd_test3_f
+	PARTITION OF batch_cp_upd_test
+	FOR VALUES IN (3)
+	SERVER loopback
+	OPTIONS (table_name 'batch_cp_upd_test3', batch_size '1');
+-- Create statement triggers on remote tables that "log" any INSERTs
+-- performed on them.
+CREATE TABLE cmdlog (cmd text);
+CREATE FUNCTION log_stmt() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+	BEGIN INSERT INTO public.cmdlog VALUES (TG_OP || ' on ' || TG_RELNAME); RETURN NULL; END;
+$$;
+CREATE TRIGGER stmt_trig AFTER INSERT ON batch_cp_upd_test1
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+CREATE TRIGGER stmt_trig AFTER INSERT ON batch_cp_upd_test3
+	FOR EACH STATEMENT EXECUTE FUNCTION log_stmt();
+-- This update moves rows from the local partition 'batch_cp_upd_test2' to the
+-- foreign partition 'batch_cp_upd_test1', one that has insert batching
+-- enabled, so a single INSERT for both rows.
+INSERT INTO batch_cp_upd_test VALUES (2), (2);
+UPDATE batch_cp_upd_test t SET a = 1 FROM (VALUES (1), (2)) s(a) WHERE t.a = s.a AND s.a = 2;
+-- This one moves rows from the local partition 'batch_cp_upd_test2' to the
+-- foreign partition 'batch_cp_upd_test2', one that has insert batching
+-- disabled, so separate INSERTs for the two rows.
+INSERT INTO batch_cp_upd_test VALUES (2), (2);
+UPDATE batch_cp_upd_test t SET a = 3 FROM (VALUES (1), (2)) s(a) WHERE t.a = s.a AND s.a = 2;
+SELECT tableoid::regclass, * FROM batch_cp_upd_test ORDER BY 1;
        tableoid       | a 
 ----------------------+---
  batch_cp_upd_test1_f | 1
- batch_cp_up_test1    | 2
-(2 rows)
+ batch_cp_upd_test1_f | 1
+ batch_cp_upd_test3_f | 3
+ batch_cp_upd_test3_f | 3
+(4 rows)
+
+-- Should see 1 INSERT on batch_cp_upd_test1 and 2 on batch_cp_upd_test3 as
+-- described above.
+SELECT * FROM cmdlog ORDER BY 1;
+             cmd              
+------------------------------
+ INSERT on batch_cp_upd_test1
+ INSERT on batch_cp_upd_test3
+ INSERT on batch_cp_upd_test3
+(3 rows)
 
 -- Clean up
-DROP TABLE batch_table, batch_cp_upd_test, batch_table_p0, batch_table_p1 CASCADE;
+DROP TABLE batch_cp_upd_test;
+DROP TABLE batch_cp_upd_test1;
+DROP TABLE batch_cp_upd_test3;
+DROP TABLE cmdlog;
+DROP FUNCTION log_stmt();
 -- Use partitioning
 ALTER SERVER loopback OPTIONS (ADD batch_size '10');
 CREATE TABLE batch_table ( x int, field1 text, field2 text) PARTITION BY HASH (x);
@@ -11699,3 +11773,28 @@ SELECT * FROM prem2;
 
 ALTER SERVER loopback OPTIONS (DROP parallel_commit);
 ALTER SERVER loopback2 OPTIONS (DROP parallel_commit);
+-- ===================================================================
+-- test for ANALYZE sampling
+-- ===================================================================
+CREATE TABLE analyze_table (id int, a text, b bigint);
+CREATE FOREIGN TABLE analyze_ftable (id int, a text, b bigint)
+       SERVER loopback OPTIONS (table_name 'analyze_rtable1');
+INSERT INTO analyze_table (SELECT x FROM generate_series(1,1000) x);
+ANALYZE analyze_table;
+SET default_statistics_target = 10;
+ANALYZE analyze_table;
+ALTER SERVER loopback OPTIONS (analyze_sampling 'invalid');
+ERROR:  invalid value for string option "analyze_sampling": invalid
+ALTER SERVER loopback OPTIONS (analyze_sampling 'auto');
+ANALYZE analyze_table;
+ALTER SERVER loopback OPTIONS (SET analyze_sampling 'system');
+ANALYZE analyze_table;
+ALTER SERVER loopback OPTIONS (SET analyze_sampling 'bernoulli');
+ANALYZE analyze_table;
+ALTER SERVER loopback OPTIONS (SET analyze_sampling 'random');
+ANALYZE analyze_table;
+ALTER SERVER loopback OPTIONS (SET analyze_sampling 'off');
+ANALYZE analyze_table;
+-- cleanup
+DROP FOREIGN TABLE analyze_ftable;
+DROP TABLE analyze_table;

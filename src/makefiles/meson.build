@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 ### Compute pgxs_data, used in src/meson.build to generate Makefile.global
 ### etc, that's complete enough for PGXS to work.
 

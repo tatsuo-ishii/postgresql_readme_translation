@@ -3,7 +3,7 @@
  * tsvector.c
  *	  I/O functions for tsvector
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -15,10 +15,12 @@
 #include "postgres.h"
 
 #include "libpq/pqformat.h"
+#include "nodes/miscnodes.h"
 #include "tsearch/ts_locale.h"
 #include "tsearch/ts_utils.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "varatt.h"
 
 typedef struct
 {
@@ -178,6 +180,7 @@ Datum
 tsvectorin(PG_FUNCTION_ARGS)
 {
 	char	   *buf = PG_GETARG_CSTRING(0);
+	Node	   *escontext = fcinfo->context;
 	TSVectorParseState state;
 	WordEntryIN *arr;
 	int			totallen;
@@ -201,7 +204,7 @@ tsvectorin(PG_FUNCTION_ARGS)
 	char	   *cur;
 	int			buflen = 256;	/* allocated size of tmpbuf */
 
-	state = init_tsvector_parser(buf, 0);
+	state = init_tsvector_parser(buf, 0, escontext);
 
 	arrlen = 64;
 	arr = (WordEntryIN *) palloc(sizeof(WordEntryIN) * arrlen);
@@ -210,14 +213,14 @@ tsvectorin(PG_FUNCTION_ARGS)
 	while (gettoken_tsvector(state, &token, &toklen, &pos, &poslen, NULL))
 	{
 		if (toklen >= MAXSTRLEN)
-			ereport(ERROR,
+			ereturn(escontext, (Datum) 0,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("word is too long (%ld bytes, max %ld bytes)",
 							(long) toklen,
 							(long) (MAXSTRLEN - 1))));
 
 		if (cur - tmpbuf > MAXSTRPOS)
-			ereport(ERROR,
+			ereturn(escontext, (Datum) 0,
 					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 					 errmsg("string is too long for tsvector (%ld bytes, max %ld bytes)",
 							(long) (cur - tmpbuf), (long) MAXSTRPOS)));
@@ -261,13 +264,17 @@ tsvectorin(PG_FUNCTION_ARGS)
 
 	close_tsvector_parser(state);
 
+	/* Did gettoken_tsvector fail? */
+	if (SOFT_ERROR_OCCURRED(escontext))
+		PG_RETURN_NULL();
+
 	if (len > 0)
 		len = uniqueentry(arr, len, tmpbuf, &buflen);
 	else
 		buflen = 0;
 
 	if (buflen > MAXSTRPOS)
-		ereport(ERROR,
+		ereturn(escontext, (Datum) 0,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("string is too long for tsvector (%d bytes, max %d bytes)", buflen, MAXSTRPOS)));
 
@@ -285,6 +292,7 @@ tsvectorin(PG_FUNCTION_ARGS)
 		stroff += arr[i].entry.len;
 		if (arr[i].entry.haspos)
 		{
+			/* This should be unreachable because of MAXNUMPOS restrictions */
 			if (arr[i].poslen > 0xFFFF)
 				elog(ERROR, "positions array too long");
 

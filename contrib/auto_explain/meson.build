@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 auto_explain_sources = files(
   'auto_explain.c',
 )

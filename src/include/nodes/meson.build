@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 node_support_input_i = [
   'nodes/nodes.h',
   'nodes/primnodes.h',

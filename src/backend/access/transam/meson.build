@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 backend_sources += files(
   'clog.c',
   'commit_ts.c',
@@ -5,6 +7,7 @@ backend_sources += files(
   'multixact.c',
   'parallel.c',
   'rmgr.c',
+  'shell_restore.c',
   'slru.c',
   'subtrans.c',
   'timeline.c',

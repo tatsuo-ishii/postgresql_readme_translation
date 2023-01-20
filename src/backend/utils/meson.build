@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 install_data('errcodes.txt',
   install_dir: dir_data,
 )

@@ -6,7 +6,7 @@
  * loaded as a dynamic module to avoid linking the main server binary with
  * libpq.
  *
- * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -443,9 +443,9 @@ libpqrcv_startstreaming(WalReceiverConn *conn,
 		appendStringInfo(&cmd, "proto_version '%u'",
 						 options->proto.logical.proto_version);
 
-		if (options->proto.logical.streaming &&
-			PQserverVersion(conn->streamConn) >= 140000)
-			appendStringInfoString(&cmd, ", streaming 'on'");
+		if (options->proto.logical.streaming_str)
+			appendStringInfo(&cmd, ", streaming '%s'",
+							 options->proto.logical.streaming_str);
 
 		if (options->proto.logical.twophase &&
 			PQserverVersion(conn->streamConn) >= 150000)

@@ -3,7 +3,7 @@
  * ilist.c
  *	  support for integrated/inline doubly- and singly- linked lists
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -28,7 +28,7 @@
  * Caution: this is O(n); consider using slist_delete_current() instead.
  */
 void
-slist_delete(slist_head *head, slist_node *node)
+slist_delete(slist_head *head, const slist_node *node)
 {
 	slist_node *last = &head->head;
 	slist_node *cur;
@@ -57,13 +57,14 @@ slist_delete(slist_head *head, slist_node *node)
  *		Validate that 'node' is a member of 'head'
  */
 void
-dlist_member_check(dlist_head *head, dlist_node *node)
+dlist_member_check(const dlist_head *head, const dlist_node *node)
 {
-	dlist_iter	iter;
+	const dlist_node *cur;
 
-	dlist_foreach(iter, head)
+	/* iteration open-coded to due to the use of const */
+	for (cur = head->head.next; cur != &head->head; cur = cur->next)
 	{
-		if (iter.cur == node)
+		if (cur == node)
 			return;
 	}
 	elog(ERROR, "double linked list member check failure");
@@ -73,7 +74,7 @@ dlist_member_check(dlist_head *head, dlist_node *node)
  * Verify integrity of a doubly linked list
  */
 void
-dlist_check(dlist_head *head)
+dlist_check(const dlist_head *head)
 {
 	dlist_node *cur;
 
@@ -110,7 +111,7 @@ dlist_check(dlist_head *head)
  * Verify integrity of a singly linked list
  */
 void
-slist_check(slist_head *head)
+slist_check(const slist_head *head)
 {
 	slist_node *cur;
 

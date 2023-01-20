@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pg_dump_common_sources = files(
   'compress_io.c',
   'dumputils.c',

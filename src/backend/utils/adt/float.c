@@ -3,7 +3,7 @@
  * float.c
  *	  Functions for the built-in floating-point types.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -163,17 +163,35 @@ Datum
 float4in(PG_FUNCTION_ARGS)
 {
 	char	   *num = PG_GETARG_CSTRING(0);
-	Node	   *escontext = fcinfo->context;
-	char	   *orig_num;
+
+	PG_RETURN_FLOAT4(float4in_internal(num, NULL, "real", num,
+									   fcinfo->context));
+}
+
+/*
+ * float4in_internal - guts of float4in()
+ *
+ * This is exposed for use by functions that want a reasonably
+ * platform-independent way of inputting floats. The behavior is
+ * essentially like strtof + ereturn on error.
+ *
+ * Uses the same API as float8in_internal below, so most of its
+ * comments also apply here, except regarding use in geometric types.
+ */
+float4
+float4in_internal(char *num, char **endptr_p,
+				  const char *type_name, const char *orig_string,
+				  struct Node *escontext)
+{
 	float		val;
 	char	   *endptr;
 
 	/*
 	 * endptr points to the first character _after_ the sequence we recognized
-	 * as a valid floating point number. orig_num points to the original input
+	 * as a valid floating point number. orig_string points to the original
+	 * input
 	 * string.
 	 */
-	orig_num = num;
 
 	/* skip leading whitespace */
 	while (*num != '\0' && isspace((unsigned char) *num))
@@ -184,10 +202,10 @@ float4in(PG_FUNCTION_ARGS)
 	 * strtod() on different platforms.
 	 */
 	if (*num == '\0')
-		ereturn(escontext, (Datum) 0,
+		ereturn(escontext, 0,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 				 errmsg("invalid input syntax for type %s: \"%s\"",
-						"real", orig_num)));
+						type_name, orig_string)));
 
 	errno = 0;
 	val = strtof(num, &endptr);
@@ -258,30 +276,39 @@ float4in(PG_FUNCTION_ARGS)
 				(val >= HUGE_VALF || val <= -HUGE_VALF)
 #endif
 				)
-				ereturn(escontext, (Datum) 0,
+			{
+				/* see comments in float8in_internal for rationale */
+				char	   *errnumber = pstrdup(num);
+
+				errnumber[endptr - num] = '\0';
+
+				ereturn(escontext, 0,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 						 errmsg("\"%s\" is out of range for type real",
-								orig_num)));
+								errnumber)));
+			}
 		}
 		else
-			ereturn(escontext, (Datum) 0,
+			ereturn(escontext, 0,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 					 errmsg("invalid input syntax for type %s: \"%s\"",
-							"real", orig_num)));
+							type_name, orig_string)));
 	}
 
 	/* skip trailing whitespace */
 	while (*endptr != '\0' && isspace((unsigned char) *endptr))
 		endptr++;
 
-	/* if there is any junk left at the end of the string, bail out */
-	if (*endptr != '\0')
-		ereturn(escontext, (Datum) 0,
+	/* report stopping point if wanted, else complain if not end of string */
+	if (endptr_p)
+		*endptr_p = endptr;
+	else if (*endptr != '\0')
+		ereturn(escontext, 0,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 				 errmsg("invalid input syntax for type %s: \"%s\"",
-						"real", orig_num)));
+						type_name, orig_string)));
 
-	PG_RETURN_FLOAT4(val);
+	return val;
 }
 
 /*
@@ -2716,13 +2743,11 @@ datanh(PG_FUNCTION_ARGS)
 
 
 /*
- *		drandom		- returns a random number
+ * initialize_drandom_seed - initialize drandom_seed if not yet done
  */
-Datum
-drandom(PG_FUNCTION_ARGS)
+static void
+initialize_drandom_seed(void)
 {
-	float8		result;
-
 	/* Initialize random seed, if not done yet in this process */
 	if (unlikely(!drandom_seed_set))
 	{
@@ -2742,6 +2767,17 @@ drandom(PG_FUNCTION_ARGS)
 		}
 		drandom_seed_set = true;
 	}
+}
+
+/*
+ *		drandom		- returns a random number
+ */
+Datum
+drandom(PG_FUNCTION_ARGS)
+{
+	float8		result;
+
+	initialize_drandom_seed();
 
 	/* pg_prng_double produces desired result range [0.0 - 1.0) */
 	result = pg_prng_double(&drandom_seed);
@@ -2749,6 +2785,27 @@ drandom(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(result);
 }
 
+/*
+ *		drandom_normal	- returns a random number from a normal distribution
+ */
+Datum
+drandom_normal(PG_FUNCTION_ARGS)
+{
+	float8		mean = PG_GETARG_FLOAT8(0);
+	float8		stddev = PG_GETARG_FLOAT8(1);
+	float8		result,
+				z;
+
+	initialize_drandom_seed();
+
+	/* Get random value from standard normal(mean = 0.0, stddev = 1.0) */
+	z = pg_prng_double_normal(&drandom_seed);
+	/* Transform the normal standard variable (z) */
+	/* using the target normal distribution parameters */
+	result = (stddev * z) + mean;
+
+	PG_RETURN_FLOAT8(result);
+}
 
 /*
  *		setseed		- set seed for the random number generator

@@ -17,7 +17,7 @@
  * a file is successfully archived and then the system crashes before
  * a durable record of the success has been made.
  *
- * Copyright (c) 2022, PostgreSQL Global Development Group
+ * Copyright (c) 2022-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  contrib/basic_archive/basic_archive.c
@@ -275,7 +275,7 @@ basic_archive_file_internal(const char *file, const char *path)
 	 * Copy the file to its temporary destination.  Note that this will fail
 	 * if temp already exists.
 	 */
-	copy_file(unconstify(char *, path), temp);
+	copy_file(path, temp);
 
 	/*
 	 * Sync the temporary file to disk and move it to its final destination.

@@ -191,7 +191,7 @@ CREATE USER <replaceable>name</replaceable>;
      </varlistentry>
 
      <varlistentry>
-      <term>role creation<indexterm><primary>role</primary><secondary>privilege to create</secondary></indexterm></term>
+      <term id='role-creation'>role creation<indexterm><primary>role</primary><secondary>privilege to create</secondary></indexterm></term>
       <listitem>
        <para>
         A role must be explicitly given permission to create more roles
@@ -199,10 +199,35 @@ CREATE USER <replaceable>name</replaceable>;
         checks). To create such a role, use <literal>CREATE ROLE
         <replaceable>name</replaceable> CREATEROLE</literal>.
         A role with <literal>CREATEROLE</literal> privilege can alter and drop
-        other roles, too, as well as grant or revoke membership in them.
-        However, to create, alter, drop, or change membership of a
-        superuser role, superuser status is required;
-        <literal>CREATEROLE</literal> is insufficient for that.
+        roles which have been granted to the <literal>CREATEROLE</literal>
+        user with the <literal>ADMIN</literal> option. Such a grant occurs
+        automatically when a <literal>CREATEROLE</literal> user that is not
+        a superuser creates a new role, so that by default, a
+        <literal>CREATEROLE</literal> user can alter and drop the roles
+        which they have created.
+        Altering a role includes most changes that can be made using
+        <literal>ALTER ROLE</literal>, including, for example, changing
+        passwords.  It also includes modifications to a role that can
+        be made using the <literal>COMMENT</literal> and
+        <literal>SECURITY LABEL</literal> commands.
+       </para>
+       <para>
+        However, <literal>CREATEROLE</literal> does not convey the ability to
+        create <literal>SUPERUSER</literal> roles, nor does it convey any
+        power over <literal>SUPERUSER</literal> roles that already exist.
+        Furthermore, <literal>CREATEROLE</literal> does not convey the power
+        to create <literal>REPLICATION</literal> users, nor the ability to
+        grant or revoke the <literal>REPLICATION</literal> privilege, nor the
+        ability to modify the role properties of such users.  However, it does
+        allow <literal>ALTER ROLE ... SET</literal> and
+        <literal>ALTER ROLE ... RENAME</literal> to be used on
+        <literal>REPLICATION</literal> roles, as well as the use of
+        <literal>COMMENT ON ROLE</literal>,
+        <literal>SECURITY LABEL ON ROLE</literal>,
+        and <literal>DROP ROLE</literal>.
+        Finally, <literal>CREATEROLE</literal> does not
+        confer the ability to grant or revoke the <literal>BYPASSRLS</literal>
+        privilege.
        </para>
       </listitem>
      </varlistentry>
@@ -280,16 +305,6 @@ CREATE USER <replaceable>name</replaceable>;
     and <xref linkend="sql-alterrole"/> commands for details.
    </para>
 
-  <tip>
-   <para>
-    It is good practice to create a role that has the <literal>CREATEDB</literal>
-    and <literal>CREATEROLE</literal> privileges, but is not a superuser, and then
-    use this role for all routine management of databases and roles.  This
-    approach avoids the dangers of operating as a superuser for tasks that
-    do not really require it.
-   </para>
-  </tip>
-
   <para>
    A role can also have role-specific defaults for many of the run-time
    configuration settings described in <xref
@@ -309,6 +324,34 @@ ALTER ROLE myname SET enable_indexscan TO off;
    Note that role-specific defaults attached to roles without
    <literal>LOGIN</literal> privilege are fairly useless, since they will never
    be invoked.
+  </para>
+
+  <para>
+   When a non-superuser creates a role using the <literal>CREATEROLE</literal>
+   privilege, the created role is automatically granted back to the creating
+   user, just as if the bootstrap superuser had executed the command
+   <literal>GRANT created_user TO creating_user WITH ADMIN TRUE, SET FALSE,
+   INHERIT FALSE</literal>. Since a <literal>CREATEROLE</literal> user can
+   only exercise special privileges with regard to an existing role if they
+   have <literal>ADMIN OPTION</literal> on it, this grant is just sufficient
+   to allow a <literal>CREATEROLE</literal> user to administer the roles they
+   created. However, because it is created with <literal>INHERIT FALSE, SET
+   FALSE</literal>, the <literal>CREATEROLE</literal> user doesn't inherit the
+   privileges of the created role, nor can it access the privileges of that
+   role using <literal>SET ROLE</literal>. However, since any user who has
+   <literal>ADMIN OPTION</literal> on a role can grant membership in that
+   role to any other user, the <literal>CREATEROLE</literal> user can gain
+   access to the created role by simplying granting that role back to
+   themselves with the <literal>INHERIT</literal> and/or <literal>SET</literal>
+   options. Thus, the fact that privileges are not inherited by default nor
+   is <literal>SET ROLE</literal> granted by default is a safeguard against
+   accidents, not a security feature. Also note that, because this automatic
+   grant is granted by the bootstrap user, it cannot be removed or changed by
+   the <literal>CREATEROLE</literal> user; however, any superuser could
+   revoke it, modify it, and/or issue additional such grants to other
+   <literal>CREATEROLE</literal> users. Whichever <literal>CREATEROLE</literal>
+   users have <literal>ADMIN OPTION</literal> on a role at any given time
+   can administer it.
   </para>
  </sect1>
 
@@ -636,16 +679,15 @@ DROP ROLE doomed_role;
        command.</entry>
       </row>
       <row>
-       <entry>pg_vacuum_all_tables</entry>
-       <entry>Allow executing the
-       <link linkend="sql-vacuum"><command>VACUUM</command></link> command on
-       all tables.</entry>
-      </row>
-      <row>
-       <entry>pg_analyze_all_tables</entry>
-       <entry>Allow executing the
-       <link linkend="sql-analyze"><command>ANALYZE</command></link> command on
-       all tables.</entry>
+       <entry>pg_maintain</entry>
+       <entry>Allow executing
+       <link linkend="sql-vacuum"><command>VACUUM</command></link>,
+       <link linkend="sql-analyze"><command>ANALYZE</command></link>,
+       <link linkend="sql-cluster"><command>CLUSTER</command></link>,
+       <link linkend="sql-refreshmaterializedview"><command>REFRESH MATERIALIZED VIEW</command></link>,
+       <link linkend="sql-reindex"><command>REINDEX</command></link>,
+       and <link linkend="sql-lock"><command>LOCK TABLE</command></link> on all
+       relations.</entry>
       </row>
      </tbody>
     </tgroup>

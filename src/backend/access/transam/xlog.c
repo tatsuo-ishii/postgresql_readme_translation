@@ -28,7 +28,7 @@
  * the current system state, and for starting/stopping backups.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/access/transam/xlog.c
@@ -692,6 +692,7 @@ static char *GetXLogBuffer(XLogRecPtr ptr, TimeLineID tli);
 static XLogRecPtr XLogBytePosToRecPtr(uint64 bytepos);
 static XLogRecPtr XLogBytePosToEndRecPtr(uint64 bytepos);
 static uint64 XLogRecPtrToBytePos(XLogRecPtr ptr);
+static void GetOldestRestartPointFileName(char *fname);
 
 static void WALInsertLockAcquire(void);
 static void WALInsertLockAcquireExclusive(void);
@@ -3884,15 +3885,6 @@ WriteControlFile(void)
 	char		buffer[PG_CONTROL_FILE_SIZE];	/* need not be aligned */
 
 	/*
-	 * Ensure that the size of the pg_control data structure is sane.  See the
-	 * comments for these symbols in pg_control.h.
-	 */
-	StaticAssertStmt(sizeof(ControlFileData) <= PG_CONTROL_MAX_SAFE_SIZE,
-					 "pg_control is too large for atomic disk writes");
-	StaticAssertStmt(sizeof(ControlFileData) <= PG_CONTROL_FILE_SIZE,
-					 "sizeof(ControlFileData) exceeds PG_CONTROL_FILE_SIZE");
-
-	/*
 	 * Initialize version and compatibility-check fields
 	 */
 	ControlFile->pg_control_version = PG_CONTROL_VERSION;
@@ -4896,10 +4888,12 @@ CleanupAfterArchiveRecovery(TimeLineID EndOfLogTLI, XLogRecPtr EndOfLog,
 	 * Execute the recovery_end_command, if any.
 	 */
 	if (recoveryEndCommand && strcmp(recoveryEndCommand, "") != 0)
-		ExecuteRecoveryCommand(recoveryEndCommand,
-							   "recovery_end_command",
-							   true,
-							   WAIT_EVENT_RECOVERY_END_COMMAND);
+	{
+		char		lastRestartPointFname[MAXFNAMELEN];
+
+		GetOldestRestartPointFileName(lastRestartPointFname);
+		shell_recovery_end(lastRestartPointFname);
+	}
 
 	/*
 	 * We switched to a new timeline. Clean up segments on the old timeline.
@@ -7316,10 +7310,12 @@ CreateRestartPoint(int flags)
 	 * Finally, execute archive_cleanup_command, if any.
 	 */
 	if (archiveCleanupCommand && strcmp(archiveCleanupCommand, "") != 0)
-		ExecuteRecoveryCommand(archiveCleanupCommand,
-							   "archive_cleanup_command",
-							   false,
-							   WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND);
+	{
+		char		lastRestartPointFname[MAXFNAMELEN];
+
+		GetOldestRestartPointFileName(lastRestartPointFname);
+		shell_archive_cleanup(lastRestartPointFname);
+	}
 
 	return true;
 }
@@ -7342,7 +7338,8 @@ CreateRestartPoint(int flags)
  *   above.
  *
  * * WALAVAIL_REMOVED means it has been removed. A replication stream on
- *   a slot with this LSN cannot continue after a restart.
+ *   a slot with this LSN cannot continue.  (Any associated walsender
+ *   processes should have been terminated already.)
  *
  * * WALAVAIL_INVALID_LSN means the slot hasn't been set to reserve WAL.
  */
@@ -8891,6 +8888,22 @@ GetOldestRestartPoint(XLogRecPtr *oldrecptr, TimeLineID *oldtli)
 	*oldrecptr = ControlFile->checkPointCopy.redo;
 	*oldtli = ControlFile->checkPointCopy.ThisTimeLineID;
 	LWLockRelease(ControlFileLock);
+}
+
+/*
+ * Returns the WAL file name for the last checkpoint or restartpoint.  This is
+ * the oldest WAL file that we still need if we have to restart recovery.
+ */
+static void
+GetOldestRestartPointFileName(char *fname)
+{
+	XLogRecPtr	restartRedoPtr;
+	TimeLineID	restartTli;
+	XLogSegNo	restartSegNo;
+
+	GetOldestRestartPoint(&restartRedoPtr, &restartTli);
+	XLByteToSeg(restartRedoPtr, restartSegNo, wal_segment_size);
+	XLogFileName(fname, restartTli, restartSegNo, wal_segment_size);
 }
 
 /* Thin wrapper around ShutdownWalRcv(). */

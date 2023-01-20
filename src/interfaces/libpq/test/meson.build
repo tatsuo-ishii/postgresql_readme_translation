@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 libpq_uri_regress_sources = files(
   'libpq_uri_regress.c',
 )

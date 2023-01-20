@@ -3,7 +3,7 @@
  * parse_merge.c
  *	  handle merge-statement in parser
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -155,12 +155,12 @@ transformMergeStmt(ParseState *pstate, MergeStmt *stmt)
 		/*
 		 * Check for unreachable WHEN clauses
 		 */
-		if (mergeWhenClause->condition == NULL)
-			is_terminal[when_type] = true;
-		else if (is_terminal[when_type])
+		if (is_terminal[when_type])
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
 					 errmsg("unreachable WHEN clause specified after unconditional WHEN clause")));
+		if (mergeWhenClause->condition == NULL)
+			is_terminal[when_type] = true;
 	}
 
 	/*

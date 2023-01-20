@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 # Entry point for building PostgreSQL with meson
 #
 # Good starting points for writing meson.build files are:
@@ -19,7 +21,7 @@ project('postgresql',
     'buildtype=release',
     # For compatibility with the autoconf build, set a default prefix. This
     # works even on windows, where it's a drive-relative path (i.e. when on
-    # d:/sompath it'll install to d:/usr/local/pgsql)
+    # d:/somepath it'll install to d:/usr/local/pgsql)
     'prefix=/usr/local/pgsql',
   ]
 )
@@ -209,6 +211,7 @@ if host_system == 'aix'
   memset_loop_limit = 0
 
 elif host_system == 'cygwin'
+  sema_kind = 'unnamed_posix'
   cppflags += '-D_GNU_SOURCE'
   dlsuffix = '.dll'
   mod_link_args_fmt = ['@0@']
@@ -1076,7 +1079,7 @@ if not get_option('readline').disabled()
 
     if not at_least_one_header_found
       error('''readline header not found
-If you have @0@ already installed, see see meson-log/meson-log.txt for details on the
+If you have @0@ already installed, see meson-log/meson-log.txt for details on the
 failure. It is possible the compiler isn't looking in the proper directory.
 Use -Dreadline=false to disable readline support.'''.format(readline_dep))
     endif

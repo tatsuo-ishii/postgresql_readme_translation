@@ -21,7 +21,7 @@
  * are different.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/libpq/pqformat.c
@@ -77,6 +77,7 @@
 #include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
 #include "port/pg_bswap.h"
+#include "varatt.h"
 
 
 /* --------------------------------

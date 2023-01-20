@@ -4,7 +4,7 @@
  *	  POSTGRES heap tuple header definitions.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/htup_details.h
@@ -19,6 +19,7 @@
 #include "access/tupdesc.h"
 #include "access/tupmacs.h"
 #include "storage/bufpage.h"
+#include "varatt.h"
 
 /*
  * MaxTupleAttributeNumber limits the number of (user) columns in a tuple.
@@ -425,6 +426,9 @@ do { \
 	Assert((tup)->t_infomask & HEAP_MOVED); \
 	(tup)->t_choice.t_heap.t_field3.t_xvac = (xid); \
 } while (0)
+
+StaticAssertDecl(MaxOffsetNumber < SpecTokenOffsetNumber,
+				 "invalid speculative token constant");
 
 #define HeapTupleHeaderIsSpeculative(tup) \
 ( \

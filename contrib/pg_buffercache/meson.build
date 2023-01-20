@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pg_buffercache_sources = files(
   'pg_buffercache_pages.c',
 )

@@ -46,7 +46,7 @@
  * exported rather than being "static" in this file.)
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -496,7 +496,7 @@ ExecInterpExpr(ExprState *state, ExprContext *econtext, bool *isnull)
 		&&CASE_EEOP_LAST
 	};
 
-	StaticAssertStmt(EEOP_LAST + 1 == lengthof(dispatch_table),
+	StaticAssertDecl(lengthof(dispatch_table) == EEOP_LAST + 1,
 					 "dispatch_table out of whack with ExprEvalOp");
 
 	if (unlikely(state == NULL))

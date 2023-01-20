@@ -3,7 +3,7 @@
  * date.c
  *	  implements DATE and TIME data types specified in SQL standard
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -347,10 +347,7 @@ current_time(PG_FUNCTION_ARGS)
 	int32		typmod = -1;
 
 	if (!PG_ARGISNULL(0))
-	{
-		typmod = PG_GETARG_INT32(0);
-		anytime_typmod_check(true, typmod);
-	}
+		typmod = anytime_typmod_check(true, PG_GETARG_INT32(0));
 
 	GetCurrentTimeUsec(tm, &fsec, &tz);
 
@@ -375,10 +372,7 @@ sql_localtime(PG_FUNCTION_ARGS)
 	int32		typmod = -1;
 
 	if (!PG_ARGISNULL(0))
-	{
-		typmod = PG_GETARG_INT32(0);
-		anytime_typmod_check(false, typmod);
-	}
+		typmod = anytime_typmod_check(false, PG_GETARG_INT32(0));
 
 	GetCurrentTimeUsec(tm, &fsec, &tz);
 

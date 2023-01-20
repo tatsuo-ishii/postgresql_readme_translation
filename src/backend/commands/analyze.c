@@ -3,7 +3,7 @@
  * analyze.c
  *	  the Postgres statistics generator
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -167,7 +167,7 @@ analyze_rel(Oid relid, RangeVar *relation,
 	 */
 	if (!vacuum_is_permitted_for_relation(RelationGetRelid(onerel),
 										  onerel->rd_rel,
-										  VACOPT_ANALYZE))
+										  params->options & VACOPT_ANALYZE))
 	{
 		relation_close(onerel, ShareUpdateExclusiveLock);
 		return;

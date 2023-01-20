@@ -3,7 +3,7 @@
  * pgoutput.c
  *		Logical Replication output plugin
  *
- * Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  src/backend/replication/pgoutput/pgoutput.c
@@ -18,6 +18,7 @@
 #include "catalog/pg_publication_rel.h"
 #include "catalog/pg_subscription.h"
 #include "commands/defrem.h"
+#include "commands/subscriptioncmds.h"
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "nodes/makefuncs.h"
@@ -290,7 +291,7 @@ parse_output_parameters(List *options, PGOutputData *data)
 	bool		origin_option_given = false;
 
 	data->binary = false;
-	data->streaming = false;
+	data->streaming = LOGICALREP_STREAM_OFF;
 	data->messages = false;
 	data->two_phase = false;
 
@@ -369,7 +370,7 @@ parse_output_parameters(List *options, PGOutputData *data)
 						 errmsg("conflicting or redundant options")));
 			streaming_given = true;
 
-			data->streaming = defGetBoolean(defel);
+			data->streaming = defGetStreamingMode(defel);
 		}
 		else if (strcmp(defel->defname, "two_phase") == 0)
 		{
@@ -461,13 +462,20 @@ pgoutput_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 		 * we only allow it with sufficient version of the protocol, and when
 		 * the output plugin supports it.
 		 */
-		if (!data->streaming)
+		if (data->streaming == LOGICALREP_STREAM_OFF)
 			ctx->streaming = false;
-		else if (data->protocol_version < LOGICALREP_PROTO_STREAM_VERSION_NUM)
+		else if (data->streaming == LOGICALREP_STREAM_ON &&
+				 data->protocol_version < LOGICALREP_PROTO_STREAM_VERSION_NUM)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("requested proto_version=%d does not support streaming, need %d or higher",
 							data->protocol_version, LOGICALREP_PROTO_STREAM_VERSION_NUM)));
+		else if (data->streaming == LOGICALREP_STREAM_PARALLEL &&
+				 data->protocol_version < LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("requested proto_version=%d does not support parallel streaming, need %d or higher",
+							data->protocol_version, LOGICALREP_PROTO_STREAM_PARALLEL_VERSION_NUM)));
 		else if (!ctx->streaming)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1050,16 +1058,31 @@ pgoutput_column_list_init(PGOutputData *data, List *publications,
 				/* Build the column list bitmap in the per-entry context. */
 				if (!pub_no_list)	/* when not null */
 				{
+					int			i;
+					int			nliveatts = 0;
+					TupleDesc	desc = RelationGetDescr(relation);
+
 					pgoutput_ensure_entry_cxt(data, entry);
 
 					cols = pub_collist_to_bitmapset(cols, cfdatum,
 													entry->entry_cxt);
 
+					/* Get the number of live attributes. */
+					for (i = 0; i < desc->natts; i++)
+					{
+						Form_pg_attribute att = TupleDescAttr(desc, i);
+
+						if (att->attisdropped || att->attgenerated)
+							continue;
+
+						nliveatts++;
+					}
+
 					/*
 					 * If column list includes all the columns of the table,
 					 * set it to NULL.
 					 */
-					if (bms_num_members(cols) == RelationGetNumberOfAttributes(relation))
+					if (bms_num_members(cols) == nliveatts)
 					{
 						bms_free(cols);
 						cols = NULL;
@@ -1841,6 +1864,8 @@ pgoutput_stream_abort(struct LogicalDecodingContext *ctx,
 					  XLogRecPtr abort_lsn)
 {
 	ReorderBufferTXN *toptxn;
+	PGOutputData *data = (PGOutputData *) ctx->output_plugin_private;
+	bool		write_abort_info = (data->streaming == LOGICALREP_STREAM_PARALLEL);
 
 	/*
 	 * The abort should happen outside streaming block, even for streamed
@@ -1854,7 +1879,9 @@ pgoutput_stream_abort(struct LogicalDecodingContext *ctx,
 	Assert(rbtxn_is_streamed(toptxn));
 
 	OutputPluginPrepareWrite(ctx, true);
-	logicalrep_write_stream_abort(ctx->out, toptxn->xid, txn->xid);
+	logicalrep_write_stream_abort(ctx->out, toptxn->xid, txn->xid, abort_lsn,
+								  txn->xact_time.abort_time, write_abort_info);
+
 	OutputPluginWrite(ctx, true);
 
 	cleanup_rel_sync_cache(toptxn->xid, false);
@@ -1929,7 +1956,22 @@ init_rel_sync_cache(MemoryContext cachectx)
 
 	Assert(RelationSyncCache != NULL);
 
+	/* We must update the cache entry for a relation after a relcache flush */
 	CacheRegisterRelcacheCallback(rel_sync_cache_relation_cb, (Datum) 0);
+
+	/*
+	 * Flush all cache entries after a pg_namespace change, in case it was a
+	 * schema rename affecting a relation being replicated.
+	 */
+	CacheRegisterSyscacheCallback(NAMESPACEOID,
+								  rel_sync_cache_publication_cb,
+								  (Datum) 0);
+
+	/*
+	 * Flush all cache entries after any publication changes.  (We need no
+	 * callback entry for pg_publication, because publication_invalidation_cb
+	 * will take care of it.)
+	 */
 	CacheRegisterSyscacheCallback(PUBLICATIONRELMAP,
 								  rel_sync_cache_publication_cb,
 								  (Datum) 0);
@@ -2325,8 +2367,8 @@ rel_sync_cache_relation_cb(Datum arg, Oid relid)
 /*
  * Publication relation/schema map syscache invalidation callback
  *
- * Called for invalidations on pg_publication, pg_publication_rel, and
- * pg_publication_namespace.
+ * Called for invalidations on pg_publication, pg_publication_rel,
+ * pg_publication_namespace, and pg_namespace.
  */
 static void
 rel_sync_cache_publication_cb(Datum arg, int cacheid, uint32 hashvalue)
@@ -2337,14 +2379,14 @@ rel_sync_cache_publication_cb(Datum arg, int cacheid, uint32 hashvalue)
 	/*
 	 * We can get here if the plugin was used in SQL interface as the
 	 * RelSchemaSyncCache is destroyed when the decoding finishes, but there
-	 * is no way to unregister the relcache invalidation callback.
+	 * is no way to unregister the invalidation callbacks.
 	 */
 	if (RelationSyncCache == NULL)
 		return;
 
 	/*
-	 * There is no way to find which entry in our cache the hash belongs to so
-	 * mark the whole cache as invalid.
+	 * We have no easy way to identify which cache entries this invalidation
+	 * event might have affected, so just mark them all invalid.
 	 */
 	hash_seq_init(&status, RelationSyncCache);
 	while ((entry = (RelationSyncEntry *) hash_seq_search(&status)) != NULL)

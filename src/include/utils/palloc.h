@@ -18,7 +18,7 @@
  * everything that should be freed.  See utils/mmgr/README for more info.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/palloc.h
@@ -73,10 +73,13 @@ extern void *MemoryContextAllocZero(MemoryContext context, Size size);
 extern void *MemoryContextAllocZeroAligned(MemoryContext context, Size size);
 extern void *MemoryContextAllocExtended(MemoryContext context,
 										Size size, int flags);
+extern void *MemoryContextAllocAligned(MemoryContext context,
+									   Size size, Size alignto, int flags);
 
 extern void *palloc(Size size);
 extern void *palloc0(Size size);
 extern void *palloc_extended(Size size, int flags);
+extern void *palloc_aligned(Size size, Size alignto, int flags);
 extern pg_nodiscard void *repalloc(void *pointer, Size size);
 extern pg_nodiscard void *repalloc_extended(void *pointer,
 											Size size, int flags);

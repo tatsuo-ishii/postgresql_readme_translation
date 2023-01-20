@@ -3,7 +3,7 @@
  * ts_typanalyze.c
  *	  functions for gathering statistics from tsvector columns
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -19,6 +19,7 @@
 #include "common/hashfn.h"
 #include "tsearch/ts_type.h"
 #include "utils/builtins.h"
+#include "varatt.h"
 
 
 /* A hash key for lexemes */

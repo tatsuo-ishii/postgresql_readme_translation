@@ -2,7 +2,7 @@
  * gin.h
  *	  Public header file for Generalized Inverted Index access method.
  *
- *	Copyright (c) 2006-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2006-2023, PostgreSQL Global Development Group
  *
  *	src/include/access/gin.h
  *--------------------------------------------------------------------------
@@ -56,6 +56,9 @@ typedef struct GinStatsData
  * pointer to a bool to a pointer to a GinTernaryValue.
  */
 typedef char GinTernaryValue;
+
+StaticAssertDecl(sizeof(GinTernaryValue) == sizeof(bool),
+				 "sizes of GinTernaryValue and bool are not equal");
 
 #define GIN_FALSE		0		/* item is not present / does not match */
 #define GIN_TRUE		1		/* item is present / matches */

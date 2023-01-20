@@ -5,7 +5,7 @@
  *	  wherein you authenticate a user by seeing what IP address the system
  *	  says he comes from and choosing authentication method based on it).
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -73,8 +73,10 @@ typedef struct
 } tokenize_error_callback_arg;
 
 #define token_has_regexp(t)	(t->regex != NULL)
+#define token_is_member_check(t)	(!t->quoted && t->string[0] == '+')
 #define token_is_keyword(t, k)	(!t->quoted && strcmp(t->string, k) == 0)
 #define token_matches(t, k)  (strcmp(t->string, k) == 0)
+#define token_matches_insensitive(t,k) (pg_strcasecmp(t->string, k) == 0)
 
 /*
  * Memory context holding the list of TokenizedAuthLines when parsing
@@ -126,6 +128,12 @@ static const char *const UserAuthName[] =
 	"radius",
 	"peer"
 };
+
+/*
+ * Make sure UserAuthName[] tracks additions to the UserAuth enum
+ */
+StaticAssertDecl(lengthof(UserAuthName) == USER_AUTH_LAST + 1,
+				 "UserAuthName[] must match the UserAuth enum");
 
 
 static List *tokenize_expand_file(List *tokens, const char *outer_filename,
@@ -989,10 +997,11 @@ is_member(Oid userid, const char *role)
  *
  * Each AuthToken listed is checked one-by-one.  Keywords are processed
  * first (these cannot have regular expressions), followed by regular
- * expressions (if any) and the exact match.
+ * expressions (if any), the case-insensitive match (if requested) and
+ * the exact match.
  */
 static bool
-check_role(const char *role, Oid roleid, List *tokens)
+check_role(const char *role, Oid roleid, List *tokens, bool case_insensitive)
 {
 	ListCell   *cell;
 	AuthToken  *tok;
@@ -1000,7 +1009,7 @@ check_role(const char *role, Oid roleid, List *tokens)
 	foreach(cell, tokens)
 	{
 		tok = lfirst(cell);
-		if (!tok->quoted && tok->string[0] == '+')
+		if (token_is_member_check(tok))
 		{
 			if (is_member(roleid, tok->string + 1))
 				return true;
@@ -1010,6 +1019,11 @@ check_role(const char *role, Oid roleid, List *tokens)
 		else if (token_has_regexp(tok))
 		{
 			if (regexec_auth_token(role, tok, 0, NULL) == REG_OKAY)
+				return true;
+		}
+		else if (case_insensitive)
+		{
+			if (token_matches_insensitive(tok, role))
 				return true;
 		}
 		else if (token_matches(tok, role))
@@ -2608,7 +2622,7 @@ check_hba(hbaPort *port)
 					  hba->databases))
 			continue;
 
-		if (!check_role(port->user_name, roleid, hba->roles))
+		if (!check_role(port->user_name, roleid, hba->roles, false))
 			continue;
 
 		/* Found a record that matched! */
@@ -2786,7 +2800,7 @@ parse_ident_line(TokenizedAuthLine *tok_line, int elevel)
 	token = linitial(tokens);
 
 	/* Copy the ident user token */
-	parsedline->token = copy_auth_token(token);
+	parsedline->system_user = copy_auth_token(token);
 
 	/* Get the PG rolename token */
 	field = lnext(tok_line->fields, field);
@@ -2794,13 +2808,20 @@ parse_ident_line(TokenizedAuthLine *tok_line, int elevel)
 	tokens = lfirst(field);
 	IDENT_MULTI_VALUE(tokens);
 	token = linitial(tokens);
-	parsedline->pg_role = pstrdup(token->string);
+	parsedline->pg_user = copy_auth_token(token);
 
 	/*
 	 * Now that the field validation is done, compile a regex from the user
-	 * token, if necessary.
+	 * tokens, if necessary.
 	 */
-	if (regcomp_auth_token(parsedline->token, file_name, line_num,
+	if (regcomp_auth_token(parsedline->system_user, file_name, line_num,
+						   err_msg, elevel))
+	{
+		/* err_msg includes the error to report */
+		return NULL;
+	}
+
+	if (regcomp_auth_token(parsedline->pg_user, file_name, line_num,
 						   err_msg, elevel))
 	{
 		/* err_msg includes the error to report */
@@ -2813,14 +2834,16 @@ parse_ident_line(TokenizedAuthLine *tok_line, int elevel)
 /*
  *	Process one line from the parsed ident config lines.
  *
- *	Compare input parsed ident line to the needed map, pg_role and ident_user.
+ *	Compare input parsed ident line to the needed map, pg_user and system_user.
  *	*found_p and *error_p are set according to our results.
  */
 static void
 check_ident_usermap(IdentLine *identLine, const char *usermap_name,
-					const char *pg_role, const char *ident_user,
+					const char *pg_user, const char *system_user,
 					bool case_insensitive, bool *found_p, bool *error_p)
 {
+	Oid			roleid;
+
 	*found_p = false;
 	*error_p = false;
 
@@ -2828,8 +2851,11 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 		/* Line does not match the map name we're looking for, so just abort */
 		return;
 
+	/* Get the target role's OID.  Note we do not error out for bad role. */
+	roleid = get_role_oid(pg_user, true);
+
 	/* Match? */
-	if (token_has_regexp(identLine->token))
+	if (token_has_regexp(identLine->system_user))
 	{
 		/*
 		 * Process the system username as a regular expression that returns
@@ -2839,9 +2865,10 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 		int			r;
 		regmatch_t	matches[2];
 		char	   *ofs;
-		char	   *regexp_pgrole;
+		AuthToken  *expanded_pg_user_token;
+		bool		created_temporary_token = false;
 
-		r = regexec_auth_token(ident_user, identLine->token, 2, matches);
+		r = regexec_auth_token(system_user, identLine->system_user, 2, matches);
 		if (r)
 		{
 			char		errstr[100];
@@ -2849,18 +2876,26 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 			if (r != REG_NOMATCH)
 			{
 				/* REG_NOMATCH is not an error, everything else is */
-				pg_regerror(r, identLine->token->regex, errstr, sizeof(errstr));
+				pg_regerror(r, identLine->system_user->regex, errstr, sizeof(errstr));
 				ereport(LOG,
 						(errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
 						 errmsg("regular expression match for \"%s\" failed: %s",
-								identLine->token->string + 1, errstr)));
+								identLine->system_user->string + 1, errstr)));
 				*error_p = true;
 			}
 			return;
 		}
 
-		if ((ofs = strstr(identLine->pg_role, "\\1")) != NULL)
+		/*
+		 * Replace \1 with the first captured group unless the field already
+		 * has some special meaning, like a group membership or a regexp-based
+		 * check.
+		 */
+		if (!token_is_member_check(identLine->pg_user) &&
+			!token_has_regexp(identLine->pg_user) &&
+			(ofs = strstr(identLine->pg_user->string, "\\1")) != NULL)
 		{
+			char	   *expanded_pg_user;
 			int			offset;
 
 			/* substitution of the first argument requested */
@@ -2869,7 +2904,7 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 				ereport(LOG,
 						(errcode(ERRCODE_INVALID_REGULAR_EXPRESSION),
 						 errmsg("regular expression \"%s\" has no subexpressions as requested by backreference in \"%s\"",
-								identLine->token->string + 1, identLine->pg_role)));
+								identLine->system_user->string + 1, identLine->pg_user->string)));
 				*error_p = true;
 				return;
 			}
@@ -2878,53 +2913,60 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 			 * length: original length minus length of \1 plus length of match
 			 * plus null terminator
 			 */
-			regexp_pgrole = palloc0(strlen(identLine->pg_role) - 2 + (matches[1].rm_eo - matches[1].rm_so) + 1);
-			offset = ofs - identLine->pg_role;
-			memcpy(regexp_pgrole, identLine->pg_role, offset);
-			memcpy(regexp_pgrole + offset,
-				   ident_user + matches[1].rm_so,
+			expanded_pg_user = palloc0(strlen(identLine->pg_user->string) - 2 + (matches[1].rm_eo - matches[1].rm_so) + 1);
+			offset = ofs - identLine->pg_user->string;
+			memcpy(expanded_pg_user, identLine->pg_user->string, offset);
+			memcpy(expanded_pg_user + offset,
+				   system_user + matches[1].rm_so,
 				   matches[1].rm_eo - matches[1].rm_so);
-			strcat(regexp_pgrole, ofs + 2);
+			strcat(expanded_pg_user, ofs + 2);
+
+			/*
+			 * Mark the token as quoted, so it will only be compared literally
+			 * and not for some special meaning, such as "all" or a group
+			 * membership check.
+			 */
+			expanded_pg_user_token = make_auth_token(expanded_pg_user, true);
+			created_temporary_token = true;
+			pfree(expanded_pg_user);
 		}
 		else
 		{
-			/* no substitution, so copy the match */
-			regexp_pgrole = pstrdup(identLine->pg_role);
+			expanded_pg_user_token = identLine->pg_user;
 		}
 
-		/*
-		 * now check if the username actually matched what the user is trying
-		 * to connect as
-		 */
-		if (case_insensitive)
-		{
-			if (pg_strcasecmp(regexp_pgrole, pg_role) == 0)
-				*found_p = true;
-		}
-		else
-		{
-			if (strcmp(regexp_pgrole, pg_role) == 0)
-				*found_p = true;
-		}
-		pfree(regexp_pgrole);
+		/* check the Postgres user */
+		*found_p = check_role(pg_user, roleid,
+							  list_make1(expanded_pg_user_token),
+							  case_insensitive);
+
+		if (created_temporary_token)
+			free_auth_token(expanded_pg_user_token);
 
 		return;
 	}
 	else
 	{
-		/* Not regular expression, so make complete match */
+		/*
+		 * Not a regular expression, so make a complete match.  If the system
+		 * user does not match, just leave.
+		 */
 		if (case_insensitive)
 		{
-			if (pg_strcasecmp(identLine->pg_role, pg_role) == 0 &&
-				pg_strcasecmp(identLine->token->string, ident_user) == 0)
-				*found_p = true;
+			if (!token_matches_insensitive(identLine->system_user,
+										   system_user))
+				return;
 		}
 		else
 		{
-			if (strcmp(identLine->pg_role, pg_role) == 0 &&
-				strcmp(identLine->token->string, ident_user) == 0)
-				*found_p = true;
+			if (!token_matches(identLine->system_user, system_user))
+				return;
 		}
+
+		/* check the Postgres user */
+		*found_p = check_role(pg_user, roleid,
+							  list_make1(identLine->pg_user),
+							  case_insensitive);
 	}
 }
 
@@ -2932,20 +2974,20 @@ check_ident_usermap(IdentLine *identLine, const char *usermap_name,
 /*
  *	Scan the (pre-parsed) ident usermap file line by line, looking for a match
  *
- *	See if the user with ident username "auth_user" is allowed to act
- *	as Postgres user "pg_role" according to usermap "usermap_name".
+ *	See if the system user with ident username "system_user" is allowed to act as
+ *	Postgres user "pg_user" according to usermap "usermap_name".
  *
  *	Special case: Usermap NULL, equivalent to what was previously called
  *	"sameuser" or "samerole", means don't look in the usermap file.
- *	That's an implied map wherein "pg_role" must be identical to
- *	"auth_user" in order to be authorized.
+ *	That's an implied map wherein "pg_user" must be identical to
+ *	"system_user" in order to be authorized.
  *
  *	Iff authorized, return STATUS_OK, otherwise return STATUS_ERROR.
  */
 int
 check_usermap(const char *usermap_name,
-			  const char *pg_role,
-			  const char *auth_user,
+			  const char *pg_user,
+			  const char *system_user,
 			  bool case_insensitive)
 {
 	bool		found_entry = false,
@@ -2955,17 +2997,17 @@ check_usermap(const char *usermap_name,
 	{
 		if (case_insensitive)
 		{
-			if (pg_strcasecmp(pg_role, auth_user) == 0)
+			if (pg_strcasecmp(pg_user, system_user) == 0)
 				return STATUS_OK;
 		}
 		else
 		{
-			if (strcmp(pg_role, auth_user) == 0)
+			if (strcmp(pg_user, system_user) == 0)
 				return STATUS_OK;
 		}
 		ereport(LOG,
 				(errmsg("provided user name (%s) and authenticated user name (%s) do not match",
-						pg_role, auth_user)));
+						pg_user, system_user)));
 		return STATUS_ERROR;
 	}
 	else
@@ -2975,7 +3017,7 @@ check_usermap(const char *usermap_name,
 		foreach(line_cell, parsed_ident_lines)
 		{
 			check_ident_usermap(lfirst(line_cell), usermap_name,
-								pg_role, auth_user, case_insensitive,
+								pg_user, system_user, case_insensitive,
 								&found_entry, &error);
 			if (found_entry || error)
 				break;
@@ -2985,7 +3027,7 @@ check_usermap(const char *usermap_name,
 	{
 		ereport(LOG,
 				(errmsg("no match in usermap \"%s\" for user \"%s\" authenticated as \"%s\"",
-						usermap_name, pg_role, auth_user)));
+						usermap_name, pg_user, system_user)));
 	}
 	return found_entry ? STATUS_OK : STATUS_ERROR;
 }
@@ -3067,7 +3109,8 @@ load_ident(void)
 		foreach(parsed_line_cell, new_parsed_lines)
 		{
 			newline = (IdentLine *) lfirst(parsed_line_cell);
-			free_auth_token(newline->token);
+			free_auth_token(newline->system_user);
+			free_auth_token(newline->pg_user);
 		}
 		MemoryContextDelete(ident_context);
 		return false;
@@ -3079,7 +3122,8 @@ load_ident(void)
 		foreach(parsed_line_cell, parsed_ident_lines)
 		{
 			newline = (IdentLine *) lfirst(parsed_line_cell);
-			free_auth_token(newline->token);
+			free_auth_token(newline->system_user);
+			free_auth_token(newline->pg_user);
 		}
 	}
 	if (parsed_ident_context != NULL)
@@ -3117,11 +3161,5 @@ hba_getauthmethod(hbaPort *port)
 const char *
 hba_authname(UserAuth auth_method)
 {
-	/*
-	 * Make sure UserAuthName[] tracks additions to the UserAuth enum
-	 */
-	StaticAssertStmt(lengthof(UserAuthName) == USER_AUTH_LAST + 1,
-					 "UserAuthName[] must match the UserAuth enum");
-
 	return UserAuthName[auth_method];
 }

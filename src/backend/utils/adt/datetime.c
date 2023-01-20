@@ -3,7 +3,7 @@
  * datetime.c
  *	  Support functions for date/time types.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -105,6 +105,7 @@ const char *const days[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
  */
 static const datetkn datetktbl[] = {
 	/* token, type, value */
+	{"+infinity", RESERV, DTK_LATE},	/* same as "infinity" */
 	{EARLY, RESERV, DTK_EARLY}, /* "-infinity" reserved for "early time" */
 	{DA_D, ADBC, AD},			/* "ad" for years > 0 */
 	{"allballs", RESERV, DTK_ZULU}, /* 00:00:00 */
@@ -4983,19 +4984,10 @@ pg_timezone_abbrevs(PG_FUNCTION_ARGS)
 		*pindex = 0;
 		funcctx->user_fctx = (void *) pindex;
 
-		/*
-		 * build tupdesc for result tuples. This must match this function's
-		 * pg_proc entry!
-		 */
-		tupdesc = CreateTemplateTupleDesc(3);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "abbrev",
-						   TEXTOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "utc_offset",
-						   INTERVALOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "is_dst",
-						   BOOLOID, -1, 0);
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			elog(ERROR, "return type must be a row type");
+		funcctx->tuple_desc = tupdesc;
 
-		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
 		MemoryContextSwitchTo(oldcontext);
 	}
 

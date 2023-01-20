@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pgstattuple_sources = files(
   'pgstatapprox.c',
   'pgstatindex.c',

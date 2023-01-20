@@ -3,7 +3,7 @@
  * timestamp.c
  *	  Functions for the built-in SQL types "timestamp" and "interval".
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1606,10 +1606,7 @@ current_timestamp(PG_FUNCTION_ARGS)
 	int32		typmod = -1;
 
 	if (!PG_ARGISNULL(0))
-	{
-		typmod = PG_GETARG_INT32(0);
-		anytimestamp_typmod_check(true, typmod);
-	}
+		typmod = anytimestamp_typmod_check(true, PG_GETARG_INT32(0));
 
 	ts = GetCurrentTransactionStartTimestamp();
 	if (typmod >= 0)
@@ -1627,10 +1624,7 @@ sql_localtimestamp(PG_FUNCTION_ARGS)
 	int32		typmod = -1;
 
 	if (!PG_ARGISNULL(0))
-	{
-		typmod = PG_GETARG_INT32(0);
-		anytimestamp_typmod_check(false, typmod);
-	}
+		typmod = anytimestamp_typmod_check(false, PG_GETARG_INT32(0));
 
 	ts = timestamptz2timestamp(GetCurrentTransactionStartTimestamp());
 	if (typmod >= 0)

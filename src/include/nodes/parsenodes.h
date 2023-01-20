@@ -12,7 +12,7 @@
  * identifying statement boundaries in multi-statement source strings.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/parsenodes.h
@@ -95,9 +95,8 @@ typedef uint64 AclMode;			/* a bitmask of privilege bits */
 #define ACL_CONNECT		(1<<11) /* for databases */
 #define ACL_SET			(1<<12) /* for configuration parameters */
 #define ACL_ALTER_SYSTEM (1<<13)	/* for configuration parameters */
-#define ACL_VACUUM		(1<<14) /* for relations */
-#define ACL_ANALYZE		(1<<15) /* for relations */
-#define N_ACL_RIGHTS	16		/* 1 plus the last 1<<x */
+#define ACL_MAINTAIN		(1<<14) /* for relations */
+#define N_ACL_RIGHTS	15		/* 1 plus the last 1<<x */
 #define ACL_NO_RIGHTS	0
 /* Currently, SELECT ... FOR [KEY] UPDATE/SHARE requires UPDATE privileges */
 #define ACL_SELECT_FOR_UPDATE	ACL_UPDATE
@@ -1010,11 +1009,6 @@ typedef struct RangeTblEntry
 	/*
 	 * Fields valid for a plain relation RTE (else zero):
 	 *
-	 * As a special case, RTE_NAMEDTUPLESTORE can also set relid to indicate
-	 * that the tuple format of the tuplestore is the same as the referenced
-	 * relation.  This allows plans referencing AFTER trigger transition
-	 * tables to be invalidated if the underlying table is altered.
-	 *
 	 * rellockmode is really LOCKMODE, but it's declared int to avoid having
 	 * to include lock-related headers here.  It must be RowExclusiveLock if
 	 * the RTE is an INSERT/UPDATE/DELETE/MERGE target, else RowShareLock if
@@ -1029,6 +1023,19 @@ typedef struct RangeTblEntry
 	 * perminfoindex is 1-based index of the RTEPermissionInfo belonging to
 	 * this RTE in the containing struct's list of same; 0 if permissions need
 	 * not be checked for this RTE.
+	 *
+	 * As a special case, relid, rellockmode, and perminfoindex can also be
+	 * set (nonzero) in an RTE_SUBQUERY RTE.  This occurs when we convert an
+	 * RTE_RELATION RTE naming a view into an RTE_SUBQUERY containing the
+	 * view's query.  We still need to perform run-time locking and permission
+	 * checks on the view, even though it's not directly used in the query
+	 * anymore, and the most expedient way to do that is to retain these
+	 * fields from the old state of the RTE.
+	 *
+	 * As a special case, RTE_NAMEDTUPLESTORE can also set relid to indicate
+	 * that the tuple format of the tuplestore is the same as the referenced
+	 * relation.  This allows plans referencing AFTER trigger transition
+	 * tables to be invalidated if the underlying table is altered.
 	 */
 	Oid			relid;			/* OID of the relation */
 	char		relkind;		/* relation kind (see pg_class.relkind) */
@@ -1154,7 +1161,6 @@ typedef struct RangeTblEntry
 	bool		lateral;		/* subquery, function, or values is LATERAL? */
 	bool		inh;			/* inheritance requested? */
 	bool		inFromCl;		/* present in FROM clause? */
-	Bitmapset  *extraUpdatedCols;	/* generated columns being updated */
 	List	   *securityQuals;	/* security barrier quals to apply, if any */
 } RangeTblEntry;
 
@@ -1190,15 +1196,6 @@ typedef struct RangeTblEntry
  * updatedCols is also used in some other places, for example, to determine
  * which triggers to fire and in FDWs to know which changed columns they need
  * to ship off.
- *
- * Generated columns that are caused to be updated by an update to a base
- * column are listed in extraUpdatedCols.  This is not considered for
- * permission checking, but it is useful in those places that want to know the
- * full set of columns being updated as opposed to only the ones the user
- * explicitly mentioned in the query.  (There is currently no need for an
- * extraInsertedCols, but it could exist.)  Note that extraUpdatedCols is
- * populated during query rewrite, NOT in the parser, since generated columns
- * could be added after a rule has been parsed and stored.
  */
 typedef struct RTEPermissionInfo
 {

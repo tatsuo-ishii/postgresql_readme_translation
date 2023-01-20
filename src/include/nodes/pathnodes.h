@@ -6,7 +6,7 @@
  * We don't support copying RelOptInfo, IndexOptInfo, or Path nodes.
  * There are some subsidiary structs that are useful to copy, though.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/pathnodes.h
@@ -407,6 +407,34 @@ struct PlannerInfo
 	struct PathTarget *upper_targets[UPPERREL_FINAL + 1] pg_node_attr(read_write_ignore);
 
 	/*
+	 * The fully-processed groupClause is kept here.  It differs from
+	 * parse->groupClause in that we remove any items that we can prove
+	 * redundant, so that only the columns named here actually need to be
+	 * compared to determine grouping.  Note that it's possible for *all* the
+	 * items to be proven redundant, implying that there is only one group
+	 * containing all the query's rows.  Hence, if you want to check whether
+	 * GROUP BY was specified, test for nonempty parse->groupClause, not for
+	 * nonempty processed_groupClause.
+	 *
+	 * Currently, when grouping sets are specified we do not attempt to
+	 * optimize the groupClause, so that processed_groupClause will be
+	 * identical to parse->groupClause.
+	 */
+	List	   *processed_groupClause;
+
+	/*
+	 * The fully-processed distinctClause is kept here.  It differs from
+	 * parse->distinctClause in that we remove any items that we can prove
+	 * redundant, so that only the columns named here actually need to be
+	 * compared to determine uniqueness.  Note that it's possible for *all*
+	 * the items to be proven redundant, implying that there should be only
+	 * one output row.  Hence, if you want to check whether DISTINCT was
+	 * specified, test for nonempty parse->distinctClause, not for nonempty
+	 * processed_distinctClause.
+	 */
+	List	   *processed_distinctClause;
+
+	/*
 	 * The fully-processed targetlist is kept here.  It differs from
 	 * parse->targetList in that (for INSERT) it's been reordered to match the
 	 * target table, and defaults have been filled in.  Also, additional
@@ -653,7 +681,7 @@ typedef struct PartitionSchemeData *PartitionScheme;
  *		lateral_referencers - relids of rels that reference this one laterally
  *				(includes both direct and indirect lateral references)
  *		indexlist - list of IndexOptInfo nodes for relation's indexes
- *					(always NIL if it's not a table)
+ *					(always NIL if it's not a table or partitioned table)
  *		pages - number of disk pages in relation (zero if not a table)
  *		tuples - number of tuples in relation (not considering restrictions)
  *		allvisfrac - fraction of disk pages that are marked all-visible
@@ -1097,11 +1125,11 @@ struct IndexOptInfo
 	Oid		   *opfamily pg_node_attr(array_size(nkeycolumns));
 	/* OIDs of opclass declared input data types */
 	Oid		   *opcintype pg_node_attr(array_size(nkeycolumns));
-	/* OIDs of btree opfamilies, if orderable */
+	/* OIDs of btree opfamilies, if orderable.  NULL if partitioned index */
 	Oid		   *sortopfamily pg_node_attr(array_size(nkeycolumns));
-	/* is sort order descending? */
+	/* is sort order descending? or NULL if partitioned index */
 	bool	   *reverse_sort pg_node_attr(array_size(nkeycolumns));
-	/* do NULLs come first in the sort order? */
+	/* do NULLs come first in the sort order? or NULL if partitioned index */
 	bool	   *nulls_first pg_node_attr(array_size(nkeycolumns));
 	/* opclass-specific options for columns */
 	bytea	  **opclassoptions pg_node_attr(read_write_ignore);
@@ -1139,7 +1167,7 @@ struct IndexOptInfo
 
 	/*
 	 * Remaining fields are copied from the index AM's API struct
-	 * (IndexAmRoutine).
+	 * (IndexAmRoutine).  These fields are not set for partitioned indexes.
 	 */
 	bool		amcanorderbyop;
 	bool		amoptionalkey;

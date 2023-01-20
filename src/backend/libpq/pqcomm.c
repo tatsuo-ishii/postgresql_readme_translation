@@ -17,7 +17,7 @@
  * the backend's "backend/libpq" is quite separate from "interfaces/libpq".
  * All that remains is similarities of names to trap the unwary...
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/libpq/pqcomm.c
@@ -683,8 +683,7 @@ Setup_AF_UNIX(const char *sock_path)
  *		server port.  Set port->sock to the FD of the new connection.
  *
  * ASSUME: that this doesn't need to be non-blocking because
- *		the Postmaster uses select() to tell when the socket is ready for
- *		accept().
+ *		the Postmaster waits for the socket to be ready to accept().
  *
  * RETURNS: STATUS_OK or STATUS_ERROR
  */

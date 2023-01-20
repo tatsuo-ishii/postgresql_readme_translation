@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pgport_sources = [
   'bsearch_arg.c',
   'chklocale.c',

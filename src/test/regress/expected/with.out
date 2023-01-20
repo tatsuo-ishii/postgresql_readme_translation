@@ -396,9 +396,9 @@ SELECT pg_get_viewdef('vsubdepartment'::regclass);
              subdepartment sd                 +
            WHERE (d.parent_department = sd.id)+
          )                                    +
-  SELECT subdepartment.id,                    +
-     subdepartment.parent_department,         +
-     subdepartment.name                       +
+  SELECT id,                                  +
+     parent_department,                       +
+     name                                     +
     FROM subdepartment;
 (1 row)
 
@@ -419,9 +419,9 @@ SELECT pg_get_viewdef('vsubdepartment'::regclass, true);
              subdepartment sd               +
            WHERE d.parent_department = sd.id+
          )                                  +
-  SELECT subdepartment.id,                  +
-     subdepartment.parent_department,       +
-     subdepartment.name                     +
+  SELECT id,                                +
+     parent_department,                     +
+     name                                   +
     FROM subdepartment;
 (1 row)
 
@@ -446,7 +446,7 @@ View definition:
            FROM t t_1
           WHERE t_1.n < 100
         )
- SELECT sum(t.n) AS sum
+ SELECT sum(n) AS sum
    FROM t;
 
 -- corner case in which sub-WITH gets initialized first
@@ -959,9 +959,9 @@ select pg_get_viewdef('v_search');
              search_graph sg                   +
            WHERE (g.f = sg.t)                  +
          ) SEARCH DEPTH FIRST BY f, t SET seq  +
-  SELECT search_graph.f,                       +
-     search_graph.t,                           +
-     search_graph.label                        +
+  SELECT f,                                    +
+     t,                                        +
+     label                                     +
     FROM search_graph;
 (1 row)
 
@@ -1252,6 +1252,29 @@ select * from test;
  0 | t        | {(0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(0)}
 (11 rows)
 
+with recursive test as (
+  select 0 as x
+  union all
+  select (x + 1) % 10
+  from test
+    where not is_cycle  -- redundant, but legal
+) cycle x set is_cycle using path
+select * from test;
+ x | is_cycle |                     path                      
+---+----------+-----------------------------------------------
+ 0 | f        | {(0)}
+ 1 | f        | {(0),(1)}
+ 2 | f        | {(0),(1),(2)}
+ 3 | f        | {(0),(1),(2),(3)}
+ 4 | f        | {(0),(1),(2),(3),(4)}
+ 5 | f        | {(0),(1),(2),(3),(4),(5)}
+ 6 | f        | {(0),(1),(2),(3),(4),(5),(6)}
+ 7 | f        | {(0),(1),(2),(3),(4),(5),(6),(7)}
+ 8 | f        | {(0),(1),(2),(3),(4),(5),(6),(7),(8)}
+ 9 | f        | {(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)}
+ 0 | t        | {(0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(0)}
+(11 rows)
+
 -- multiple CTEs
 with recursive
 graph(f, t, label) as (
@@ -1524,9 +1547,9 @@ select pg_get_viewdef('v_cycle1');
              search_graph sg                   +
            WHERE (g.f = sg.t)                  +
          ) CYCLE f, t SET is_cycle USING path  +
-  SELECT search_graph.f,                       +
-     search_graph.t,                           +
-     search_graph.label                        +
+  SELECT f,                                    +
+     t,                                        +
+     label                                     +
     FROM search_graph;
 (1 row)
 
@@ -1546,9 +1569,9 @@ select pg_get_viewdef('v_cycle2');
              search_graph sg                                                +
            WHERE (g.f = sg.t)                                               +
          ) CYCLE f, t SET is_cycle TO 'Y'::text DEFAULT 'N'::text USING path+
-  SELECT search_graph.f,                                                    +
-     search_graph.t,                                                        +
-     search_graph.label                                                     +
+  SELECT f,                                                                 +
+     t,                                                                     +
+     label                                                                  +
     FROM search_graph;
 (1 row)
 

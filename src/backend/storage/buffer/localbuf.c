@@ -4,7 +4,7 @@
  *	  local buffer manager. Fast buffer manager for temporary tables,
  *	  which never need to be WAL-logged or checkpointed, etc.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  *
@@ -610,8 +610,8 @@ AtProcExit_LocalBuffers(void)
 {
 	/*
 	 * We shouldn't be holding any remaining pins; if we are, and assertions
-	 * aren't enabled, we'll fail later in DropRelationBuffers while
-	 * trying to drop the temp rels.
+	 * aren't enabled, we'll fail later in DropRelationBuffers while trying to
+	 * drop the temp rels.
 	 */
 	CheckForLocalBufferLeaks();
 }

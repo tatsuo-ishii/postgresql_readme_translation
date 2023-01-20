@@ -10,7 +10,7 @@
  * their fields are intended to be constant, some fields change at runtime.
  *
  *
- * Copyright (c) 2000-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
  *
  * IDENTIFICATION
@@ -392,6 +392,12 @@ static const struct config_enum_entry ssl_protocol_versions_info[] = {
 	{"TLSv1.1", PG_TLS1_1_VERSION, false},
 	{"TLSv1.2", PG_TLS1_2_VERSION, false},
 	{"TLSv1.3", PG_TLS1_3_VERSION, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry logical_decoding_mode_options[] = {
+	{"buffered", LOGICAL_DECODING_MODE_BUFFERED, false},
+	{"immediate", LOGICAL_DECODING_MODE_IMMEDIATE, false},
 	{NULL, 0, false}
 };
 
@@ -968,6 +974,21 @@ struct config_bool ConfigureNamesBool[] =
 			GUC_EXPLAIN
 		},
 		&enable_partition_pruning,
+		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"enable_presorted_aggregate", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enables the planner's ability to produce plans which "
+						 "provide presorted input for ORDER BY / DISTINCT aggregate "
+						 "functions."),
+			gettext_noop("Allows the query planner to build plans which provide "
+						 "presorted input for aggregate functions with an ORDER BY / "
+						 "DISTINCT clause.  When disabled, implicit sorts are always "
+						 "performed during execution."),
+			GUC_EXPLAIN
+		},
+		&enable_presorted_aggregate,
 		true,
 		NULL, NULL, NULL
 	},
@@ -2982,6 +3003,18 @@ struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"max_parallel_apply_workers_per_subscription",
+			PGC_SIGHUP,
+			REPLICATION_SUBSCRIBERS,
+			gettext_noop("Maximum number of parallel apply workers per subscription."),
+			NULL,
+		},
+		&max_parallel_apply_workers_per_subscription,
+		2, 0, MAX_PARALLEL_WORKER_LIMIT,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"log_rotation_age", PGC_SIGHUP, LOGGING_WHERE,
 			gettext_noop("Sets the amount of time to wait before forcing "
 						 "log file rotation."),
@@ -3680,7 +3713,7 @@ struct config_real ConfigureNamesReal[] =
 		},
 		&CheckPointCompletionTarget,
 		0.9, 0.0, 1.0,
-		NULL, NULL, NULL
+		NULL, assign_checkpoint_completion_target, NULL
 	},
 
 	{
@@ -3914,6 +3947,18 @@ struct config_string ConfigureNamesString[] =
 		&temp_tablespaces,
 		"",
 		check_temp_tablespaces, assign_temp_tablespaces, NULL
+	},
+
+	{
+		{"createrole_self_grant", PGC_USERSET, CLIENT_CONN_STATEMENT,
+			gettext_noop("Sets whether a CREATEROLE user automatically grants "
+						 "the role to themselves, and with which options."),
+			NULL,
+			GUC_LIST_INPUT
+		},
+		&createrole_self_grant,
+		"",
+		check_createrole_self_grant, assign_createrole_self_grant, NULL
 	},
 
 	{
@@ -4859,6 +4904,17 @@ struct config_enum ConfigureNamesEnum[] =
 		},
 		&recovery_init_sync_method,
 		RECOVERY_INIT_SYNC_METHOD_FSYNC, recovery_init_sync_method_options,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"logical_decoding_mode", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Allows streaming or serializing each change in logical decoding."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&logical_decoding_mode,
+		LOGICAL_DECODING_MODE_BUFFERED, logical_decoding_mode_options,
 		NULL, NULL, NULL
 	},
 

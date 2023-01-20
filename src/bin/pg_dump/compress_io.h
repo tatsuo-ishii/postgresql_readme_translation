@@ -3,7 +3,7 @@
  * compress_io.h
  *	 Interface to compress_io.c routines
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -54,8 +54,6 @@ typedef struct cfp cfp;
 
 extern cfp *cfopen(const char *path, const char *mode,
 				   const pg_compress_specification compression_spec);
-extern cfp *cfdopen(int fd, const char *mode,
-					pg_compress_specification compression_spec);
 extern cfp *cfopen_read(const char *path, const char *mode);
 extern cfp *cfopen_write(const char *path, const char *mode,
 						 const pg_compress_specification compression_spec);

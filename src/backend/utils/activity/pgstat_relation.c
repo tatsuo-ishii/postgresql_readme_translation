@@ -8,7 +8,7 @@
  * storage implementation and the details about individual types of
  * statistics.
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/activity/pgstat_relation.c
@@ -783,6 +783,7 @@ pgstat_relation_flush_cb(PgStat_EntryRef *entry_ref, bool nowait)
 	if (lstats->t_counts.t_numscans)
 	{
 		TimestampTz t = GetCurrentTransactionStopTimestamp();
+
 		if (t > tabentry->lastscan)
 			tabentry->lastscan = t;
 	}

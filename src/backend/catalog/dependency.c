@@ -4,7 +4,7 @@
  *	  Routines to support inter-object dependencies.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -190,6 +190,12 @@ static const Oid object_classes[] = {
 	SubscriptionRelationId,		/* OCLASS_SUBSCRIPTION */
 	TransformRelationId			/* OCLASS_TRANSFORM */
 };
+
+/*
+ * Make sure object_classes is kept up to date with the ObjectClass enum.
+ */
+StaticAssertDecl(lengthof(object_classes) == LAST_OCLASS + 1,
+				 "object_classes[] must cover all ObjectClasses");
 
 
 static void findDependentObjects(const ObjectAddress *object,
@@ -2549,12 +2555,6 @@ add_object_address(ObjectClass oclass, Oid objectId, int32 subId,
 				   ObjectAddresses *addrs)
 {
 	ObjectAddress *item;
-
-	/*
-	 * Make sure object_classes is kept up to date with the ObjectClass enum.
-	 */
-	StaticAssertStmt(lengthof(object_classes) == LAST_OCLASS + 1,
-					 "object_classes[] must cover all ObjectClasses");
 
 	/* enlarge array if needed */
 	if (addrs->numrefs >= addrs->maxrefs)

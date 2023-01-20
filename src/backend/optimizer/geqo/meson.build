@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 backend_sources += files(
   'geqo_copy.c',
   'geqo_cx.c',

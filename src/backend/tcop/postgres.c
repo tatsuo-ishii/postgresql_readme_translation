@@ -3,7 +3,7 @@
  * postgres.c
  *	  POSTGRES C Backend Interface
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -24,7 +24,6 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/resource.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 
@@ -3391,6 +3390,9 @@ ProcessInterrupts(void)
 
 	if (LogMemoryContextPending)
 		ProcessLogMemoryContextInterrupt();
+
+	if (ParallelApplyMessagePending)
+		HandleParallelApplyMessages();
 }
 
 /*

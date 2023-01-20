@@ -46,7 +46,6 @@ LIBS += $(PTHREAD_LIBS)
 # If you add objects here, see also src/tools/msvc/Mkvcbuild.pm
 
 OBJS_COMMON = \
-	archive.o \
 	base64.o \
 	checksum_helper.o \
 	compression.o \
@@ -65,6 +64,7 @@ OBJS_COMMON = \
 	kwlookup.o \
 	link-canary.o \
 	md5_common.o \
+	percentrepl.o \
 	pg_get_line.o \
 	pg_lzcompress.o \
 	pg_prng.o \
@@ -83,9 +83,9 @@ OBJS_COMMON = \
 
 ifeq ($(with_ssl),openssl)
 OBJS_COMMON += \
-	protocol_openssl.o \
 	cryptohash_openssl.o \
-	hmac_openssl.o
+	hmac_openssl.o \
+	protocol_openssl.o
 else
 OBJS_COMMON += \
 	cryptohash.o \

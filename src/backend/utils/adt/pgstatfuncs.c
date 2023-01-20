@@ -3,7 +3,7 @@
  * pgstatfuncs.c
  *	  Functions for accessing various forms of statistics data
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -25,6 +25,7 @@
 #include "pgstat.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/postmaster.h"
+#include "replication/logicallauncher.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
@@ -409,9 +410,9 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 
 			/*
 			 * If a PGPROC entry was retrieved, display wait events and lock
-			 * group leader information if any.  To avoid extra overhead, no
-			 * extra lock is being held, so there is no guarantee of
-			 * consistency across multiple rows.
+			 * group leader or apply leader information if any.  To avoid
+			 * extra overhead, no extra lock is being held, so there is no
+			 * guarantee of consistency across multiple rows.
 			 */
 			if (proc != NULL)
 			{
@@ -426,13 +427,23 @@ pg_stat_get_activity(PG_FUNCTION_ARGS)
 
 				/*
 				 * Show the leader only for active parallel workers.  This
-				 * leaves the field as NULL for the leader of a parallel
-				 * group.
+				 * leaves the field as NULL for the leader of a parallel group
+				 * or the leader of parallel apply workers.
 				 */
 				if (leader && leader->pid != beentry->st_procpid)
 				{
 					values[28] = Int32GetDatum(leader->pid);
 					nulls[28] = false;
+				}
+				else if (beentry->st_backendType == B_BG_WORKER)
+				{
+					int			leader_pid = GetLeaderApplyWorkerPid(beentry->st_procpid);
+
+					if (leader_pid != InvalidPid)
+					{
+						values[28] = Int32GetDatum(leader_pid);
+						nulls[28] = false;
+					}
 				}
 			}
 
@@ -687,6 +698,44 @@ pg_stat_get_backend_userid(PG_FUNCTION_ARGS)
 	PG_RETURN_OID(beentry->st_userid);
 }
 
+Datum
+pg_stat_get_backend_subxact(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_GET_SUBXACT_COLS	2
+	TupleDesc	tupdesc;
+	Datum		values[PG_STAT_GET_SUBXACT_COLS];
+	bool		nulls[PG_STAT_GET_SUBXACT_COLS];
+	int32		beid = PG_GETARG_INT32(0);
+	LocalPgBackendStatus *local_beentry;
+
+	/* Initialise values and NULL flags arrays */
+	MemSet(values, 0, sizeof(values));
+	MemSet(nulls, 0, sizeof(nulls));
+
+	/* Initialise attributes information in the tuple descriptor */
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_SUBXACT_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "subxact_count",
+					   INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "subxact_overflow",
+					   BOOLOID, -1, 0);
+
+	BlessTupleDesc(tupdesc);
+
+	if ((local_beentry = pgstat_fetch_stat_local_beentry(beid)) != NULL)
+	{
+		/* Fill values and NULLs */
+		values[0] = Int32GetDatum(local_beentry->backend_subxact_count);
+		values[1] = BoolGetDatum(local_beentry->backend_subxact_overflowed);
+	}
+	else
+	{
+		nulls[0] = true;
+		nulls[1] = true;
+	}
+
+	/* Returns the record as Datum */
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
 
 Datum
 pg_stat_get_backend_activity(PG_FUNCTION_ARGS)
@@ -868,7 +917,7 @@ pg_stat_get_backend_client_addr(PG_FUNCTION_ARGS)
 	clean_ipv6_addr(beentry->st_clientaddr.addr.ss_family, remote_host);
 
 	PG_RETURN_DATUM(DirectFunctionCall1(inet_in,
-										 CStringGetDatum(remote_host)));
+										CStringGetDatum(remote_host)));
 }
 
 Datum

@@ -4,7 +4,7 @@
  *	  pg_dump is a utility for dumping out a postgres database
  *	  into a script file.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	pg_dump will read the system catalogs in a database and dump out a
@@ -4533,7 +4533,7 @@ getSubscriptions(Archive *fout)
 	if (fout->remoteVersion >= 140000)
 		appendPQExpBufferStr(query, " s.substream,\n");
 	else
-		appendPQExpBufferStr(query, " false AS substream,\n");
+		appendPQExpBufferStr(query, " 'f' AS substream,\n");
 
 	if (fout->remoteVersion >= 150000)
 		appendPQExpBufferStr(query,
@@ -4670,8 +4670,10 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	if (strcmp(subinfo->subbinary, "t") == 0)
 		appendPQExpBufferStr(query, ", binary = true");
 
-	if (strcmp(subinfo->substream, "f") != 0)
+	if (strcmp(subinfo->substream, "t") == 0)
 		appendPQExpBufferStr(query, ", streaming = on");
+	else if (strcmp(subinfo->substream, "p") == 0)
+		appendPQExpBufferStr(query, ", streaming = parallel");
 
 	if (strcmp(subinfo->subtwophasestate, two_phase_disabled) != 0)
 		appendPQExpBufferStr(query, ", two_phase = on");
@@ -6470,6 +6472,8 @@ getTables(Archive *fout, int *numTables)
 		ExecuteSqlStatement(fout, query->data);
 	}
 
+	resetPQExpBuffer(query);
+
 	for (i = 0; i < ntups; i++)
 	{
 		tblinfo[i].dobj.objType = DO_TABLE;
@@ -6587,12 +6591,36 @@ getTables(Archive *fout, int *numTables)
 			(tblinfo[i].relkind == RELKIND_RELATION ||
 			 tblinfo[i].relkind == RELKIND_PARTITIONED_TABLE))
 		{
-			resetPQExpBuffer(query);
-			appendPQExpBuffer(query,
-							  "LOCK TABLE %s IN ACCESS SHARE MODE",
-							  fmtQualifiedDumpable(&tblinfo[i]));
-			ExecuteSqlStatement(fout, query->data);
+			/*
+			 * Tables are locked in batches.  When dumping from a remote
+			 * server this can save a significant amount of time by reducing
+			 * the number of round trips.
+			 */
+			if (query->len == 0)
+				appendPQExpBuffer(query, "LOCK TABLE %s",
+								  fmtQualifiedDumpable(&tblinfo[i]));
+			else
+			{
+				appendPQExpBuffer(query, ", %s",
+								  fmtQualifiedDumpable(&tblinfo[i]));
+
+				/* Arbitrarily end a batch when query length reaches 100K. */
+				if (query->len >= 100000)
+				{
+					/* Lock another batch of tables. */
+					appendPQExpBufferStr(query, " IN ACCESS SHARE MODE");
+					ExecuteSqlStatement(fout, query->data);
+					resetPQExpBuffer(query);
+				}
+			}
 		}
+	}
+
+	if (query->len != 0)
+	{
+		/* Lock the tables in the last batch. */
+		appendPQExpBufferStr(query, " IN ACCESS SHARE MODE");
+		ExecuteSqlStatement(fout, query->data);
 	}
 
 	if (dopt->lockWaitTimeout)
@@ -8501,17 +8529,11 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 			{
 				/*
 				 * Column generation expressions cannot be dumped separately,
-				 * because there is no syntax for it.  The !shouldPrintColumn
-				 * case below will be tempted to set them to separate if they
-				 * are attached to an inherited column without a local
-				 * definition, but that would be wrong and unnecessary,
-				 * because generation expressions are always inherited, so
-				 * there is no need to set them again in child tables, and
-				 * there is no syntax for it either.  By setting separate to
+				 * because there is no syntax for it.  By setting separate to
 				 * false here we prevent the "default" from being processed as
 				 * its own dumpable object, and flagInhAttrs() will remove it
-				 * from the table when it detects that it belongs to an
-				 * inherited column.
+				 * from the table if possible (that is, if it can be inherited
+				 * from a parent).
 				 */
 				attrdefs[j].separate = false;
 			}
@@ -15524,8 +15546,7 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 		if (tbinfo->relkind == RELKIND_MATVIEW)
 			append_depends_on_extension(fout, q, &tbinfo->dobj,
 										"pg_catalog.pg_class",
-										tbinfo->relkind == RELKIND_MATVIEW ?
-										"MATERIALIZED VIEW" : "INDEX",
+										"MATERIALIZED VIEW",
 										qualrelname);
 
 		/*

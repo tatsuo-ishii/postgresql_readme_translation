@@ -3,7 +3,7 @@
  * execUtils.c
  *	  miscellaneous executor utility routines
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -52,6 +52,7 @@
 #include "access/transam.h"
 #include "executor/executor.h"
 #include "executor/execPartition.h"
+#include "executor/nodeModifyTable.h"
 #include "jit/jit.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
@@ -1342,25 +1343,10 @@ ExecGetUpdatedCols(ResultRelInfo *relinfo, EState *estate)
 Bitmapset *
 ExecGetExtraUpdatedCols(ResultRelInfo *relinfo, EState *estate)
 {
-	if (relinfo->ri_RangeTableIndex != 0)
-	{
-		RangeTblEntry *rte = exec_rt_fetch(relinfo->ri_RangeTableIndex, estate);
-
-		return rte->extraUpdatedCols;
-	}
-	else if (relinfo->ri_RootResultRelInfo)
-	{
-		ResultRelInfo *rootRelInfo = relinfo->ri_RootResultRelInfo;
-		RangeTblEntry *rte = exec_rt_fetch(rootRelInfo->ri_RangeTableIndex, estate);
-		TupleConversionMap *map = ExecGetRootToChildMap(relinfo, estate);
-
-		if (map != NULL)
-			return execute_attr_map_cols(map->attrMap, rte->extraUpdatedCols);
-		else
-			return rte->extraUpdatedCols;
-	}
-	else
-		return NULL;
+	/* In some code paths we can reach here before initializing the info */
+	if (relinfo->ri_GeneratedExprs == NULL)
+		ExecInitStoredGenerated(relinfo, estate, CMD_UPDATE);
+	return relinfo->ri_extraUpdatedCols;
 }
 
 /* Return columns being updated, including generated columns */

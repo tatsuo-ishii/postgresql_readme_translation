@@ -3,7 +3,7 @@
  * parse_relation.c
  *	  parser support routines dealing with relations
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -3834,7 +3834,7 @@ addRTEPermissionInfo(List **rteperminfos, RangeTblEntry *rte)
 {
 	RTEPermissionInfo *perminfo;
 
-	Assert(rte->rtekind == RTE_RELATION);
+	Assert(OidIsValid(rte->relid));
 	Assert(rte->perminfoindex == 0);
 
 	/* Nope, so make one and add to the list. */

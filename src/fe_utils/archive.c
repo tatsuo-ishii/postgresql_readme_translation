@@ -3,7 +3,7 @@
  * archive.c
  *	  Routines to access WAL archives from frontend
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -19,8 +19,8 @@
 #include <sys/stat.h>
 
 #include "access/xlog_internal.h"
-#include "common/archive.h"
 #include "common/logging.h"
+#include "common/percentrepl.h"
 #include "fe_utils/archive.h"
 
 
@@ -41,15 +41,18 @@ RestoreArchivedFile(const char *path, const char *xlogfname,
 {
 	char		xlogpath[MAXPGPATH];
 	char	   *xlogRestoreCmd;
+	char	   *nativePath;
 	int			rc;
 	struct stat stat_buf;
 
 	snprintf(xlogpath, MAXPGPATH, "%s/" XLOGDIR "/%s", path, xlogfname);
 
-	xlogRestoreCmd = BuildRestoreCommand(restoreCommand, xlogpath,
-										 xlogfname, NULL);
-	if (xlogRestoreCmd == NULL)
-		pg_fatal("cannot use restore_command with %%r placeholder");
+	nativePath = pstrdup(xlogpath);
+	make_native_path(nativePath);
+	xlogRestoreCmd = replace_percent_placeholders(restoreCommand,
+												  "restore_command", "fp",
+												  xlogfname, nativePath);
+	pfree(nativePath);
 
 	/*
 	 * Execute restore_command, which should copy the missing file from

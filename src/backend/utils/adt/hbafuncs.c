@@ -3,7 +3,7 @@
  * hbafuncs.c
  *	  Support functions for SQL views of authentication files.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -492,8 +492,8 @@ fill_ident_line(Tuplestorestate *tuple_store, TupleDesc tupdesc,
 	if (ident != NULL)
 	{
 		values[index++] = CStringGetTextDatum(ident->usermap);
-		values[index++] = CStringGetTextDatum(ident->token->string);
-		values[index++] = CStringGetTextDatum(ident->pg_role);
+		values[index++] = CStringGetTextDatum(ident->system_user->string);
+		values[index++] = CStringGetTextDatum(ident->pg_user->string);
 	}
 	else
 	{

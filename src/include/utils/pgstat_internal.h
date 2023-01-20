@@ -5,7 +5,7 @@
  * only be needed by files implementing statistics support (rather than ones
  * reporting / querying stats).
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * src/include/utils/pgstat_internal.h
  * ----------
@@ -625,6 +625,7 @@ extern void pgstat_wal_snapshot_cb(void);
 
 extern bool pgstat_subscription_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
 extern void pgstat_subscription_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
+
 
 /*
  * Functions in pgstat_xact.c

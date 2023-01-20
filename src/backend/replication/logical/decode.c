@@ -16,7 +16,7 @@
  *		contents of records in here except turning them into a more usable
  *		format.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -822,10 +822,11 @@ DecodeAbort(LogicalDecodingContext *ctx, XLogRecordBuffer *buf,
 		for (i = 0; i < parsed->nsubxacts; i++)
 		{
 			ReorderBufferAbort(ctx->reorder, parsed->subxacts[i],
-							   buf->record->EndRecPtr);
+							   buf->record->EndRecPtr, abort_time);
 		}
 
-		ReorderBufferAbort(ctx->reorder, xid, buf->record->EndRecPtr);
+		ReorderBufferAbort(ctx->reorder, xid, buf->record->EndRecPtr,
+						   abort_time);
 	}
 
 	/* update the decoding stats */

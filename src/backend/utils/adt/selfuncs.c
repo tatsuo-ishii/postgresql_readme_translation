@@ -10,7 +10,7 @@
  *	  Index cost functions are located via the index AM's API struct,
  *	  which is obtained from the handler function registered in pg_am.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -140,6 +140,7 @@
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 
+#define DEFAULT_PAGE_CPU_MULTIPLIER 50.0
 
 /* Hooks for plugins to get control when we ask for stats */
 get_relation_stats_hook_type get_relation_stats_hook = NULL;
@@ -5079,6 +5080,18 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		 */
 		ListCell   *ilist;
 		ListCell   *slist;
+		Oid			userid;
+
+		/*
+		 * Determine the user ID to use for privilege checks: either
+		 * onerel->userid if it's set (e.g., in case we're accessing the table
+		 * via a view), or the current user otherwise.
+		 *
+		 * If we drill down to child relations, we keep using the same userid:
+		 * it's going to be the same anyway, due to how we set up the relation
+		 * tree (q.v. build_simple_rel).
+		 */
+		userid = OidIsValid(onerel->userid) ? onerel->userid : GetUserId();
 
 		foreach(ilist, onerel->indexlist)
 		{
@@ -5149,17 +5162,9 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 							{
 								/* Get index's table for permission check */
 								RangeTblEntry *rte;
-								Oid			userid;
 
 								rte = planner_rt_fetch(index->rel->relid, root);
 								Assert(rte->rtekind == RTE_RELATION);
-
-								/*
-								 * Use onerel->userid if it's set, in case
-								 * we're accessing the table via a view.
-								 */
-								userid = OidIsValid(onerel->userid) ?
-									onerel->userid : GetUserId();
 
 								/*
 								 * For simplicity, we insist on the whole
@@ -5210,9 +5215,6 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 										/* Repeat access check on this rel */
 										rte = planner_rt_fetch(varno, root);
 										Assert(rte->rtekind == RTE_RELATION);
-
-										userid = OidIsValid(onerel->userid) ?
-											onerel->userid : GetUserId();
 
 										vardata->acl_ok =
 											rte->securityQuals == NIL &&
@@ -5280,8 +5282,6 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 				/* found a match, see if we can extract pg_statistic row */
 				if (equal(node, expr))
 				{
-					Oid			userid;
-
 					/*
 					 * XXX Not sure if we should cache the tuple somewhere.
 					 * Now we just create a new copy every time.
@@ -5290,13 +5290,6 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 						statext_expressions_load(info->statOid, rte->inh, pos);
 
 					vardata->freefunc = ReleaseDummy;
-
-					/*
-					 * Use onerel->userid if it's set, in case we're accessing
-					 * the table via a view.
-					 */
-					userid = OidIsValid(onerel->userid) ?
-						onerel->userid : GetUserId();
 
 					/*
 					 * For simplicity, we insist on the whole table being
@@ -5343,9 +5336,6 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 							/* Repeat access check on this rel */
 							rte = planner_rt_fetch(varno, root);
 							Assert(rte->rtekind == RTE_RELATION);
-
-							userid = OidIsValid(onerel->userid) ?
-								onerel->userid : GetUserId();
 
 							vardata->acl_ok =
 								rte->securityQuals == NIL &&
@@ -5485,9 +5475,10 @@ examine_simple_variable(PlannerInfo *root, Var *var,
 				rte = planner_rt_fetch(varno, root);
 				Assert(rte->rtekind == RTE_RELATION);
 
-				userid = OidIsValid(onerel->userid) ?
-					onerel->userid : GetUserId();
-
+				/*
+				 * Fine to use the same userid as it's the same in all
+				 * relations of a given inheritance tree.
+				 */
 				vardata->acl_ok =
 					rte->securityQuals == NIL &&
 					((pg_class_aclcheck(rte->relid, userid,
@@ -5992,6 +5983,10 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 	/* If it has indexes it must be a plain relation */
 	rte = root->simple_rte_array[rel->relid];
 	Assert(rte->rtekind == RTE_RELATION);
+
+	/* ignore partitioned tables.  Any indexes here are not real indexes */
+	if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+		return false;
 
 	/* Search through the indexes to see if any match our problem */
 	foreach(lc, rel->indexlist)
@@ -6865,7 +6860,7 @@ btcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * touched.  The number of such pages is btree tree height plus one (ie,
 	 * we charge for the leaf page too).  As above, charge once per SA scan.
 	 */
-	descentCost = (index->tree_height + 1) * 50.0 * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -7060,7 +7055,7 @@ gistcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	/*
 	 * Likewise add a per-page charge, calculated the same as for btrees.
 	 */
-	descentCost = (index->tree_height + 1) * 50.0 * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -7115,7 +7110,7 @@ spgcostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	/*
 	 * Likewise add a per-page charge, calculated the same as for btrees.
 	 */
-	descentCost = (index->tree_height + 1) * 50.0 * cpu_operator_cost;
+	descentCost = (index->tree_height + 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
 	costs.indexStartupCost += descentCost;
 	costs.indexTotalCost += costs.num_sa_scans * descentCost;
 
@@ -7452,6 +7447,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 				qual_arg_cost,
 				spc_random_page_cost,
 				outer_scans;
+	Cost		descentCost;
 	Relation	indexRel;
 	GinStatsData ginStats;
 	ListCell   *lc;
@@ -7676,6 +7672,47 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 */
 	dataPagesFetched = ceil(numDataPages * partialScale);
 
+	*indexStartupCost = 0;
+	*indexTotalCost = 0;
+
+	/*
+	 * Add a CPU-cost component to represent the costs of initial entry btree
+	 * descent.  We don't charge any I/O cost for touching upper btree levels,
+	 * since they tend to stay in cache, but we still have to do about log2(N)
+	 * comparisons to descend a btree of N leaf tuples.  We charge one
+	 * cpu_operator_cost per comparison.
+	 *
+	 * If there are ScalarArrayOpExprs, charge this once per SA scan.  The
+	 * ones after the first one are not startup cost so far as the overall
+	 * plan is concerned, so add them only to "total" cost.
+	 */
+	if (numEntries > 1)			/* avoid computing log(0) */
+	{
+		descentCost = ceil(log(numEntries) / log(2.0)) * cpu_operator_cost;
+		*indexStartupCost += descentCost * counts.searchEntries;
+		*indexTotalCost += counts.arrayScans * descentCost * counts.searchEntries;
+	}
+
+	/*
+	 * Add a cpu cost per entry-page fetched. This is not amortized over a
+	 * loop.
+	 */
+	*indexStartupCost += entryPagesFetched * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+	*indexTotalCost += entryPagesFetched * counts.arrayScans * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+
+	/*
+	 * Add a cpu cost per data-page fetched. This is also not amortized over a
+	 * loop. Since those are the data pages from the partial match algorithm,
+	 * charge them as startup cost.
+	 */
+	*indexStartupCost += DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost * dataPagesFetched;
+
+	/*
+	 * Since we add the startup cost to the total cost later on, remove the
+	 * initial arrayscan from the total.
+	 */
+	*indexTotalCost += dataPagesFetched * (counts.arrayScans - 1) * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+
 	/*
 	 * Calculate cache effects if more than one scan due to nestloops or array
 	 * quals.  The result is pro-rated per nestloop scan, but the array qual
@@ -7699,7 +7736,7 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	 * Here we use random page cost because logically-close pages could be far
 	 * apart on disk.
 	 */
-	*indexStartupCost = (entryPagesFetched + dataPagesFetched) * spc_random_page_cost;
+	*indexStartupCost += (entryPagesFetched + dataPagesFetched) * spc_random_page_cost;
 
 	/*
 	 * Now compute the number of data pages fetched during the scan.
@@ -7727,6 +7764,15 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	if (dataPagesFetchedBySel > dataPagesFetched)
 		dataPagesFetched = dataPagesFetchedBySel;
 
+	/* Add one page cpu-cost to the startup cost */
+	*indexStartupCost += DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost * counts.searchEntries;
+
+	/*
+	 * Add once again a CPU-cost for those data pages, before amortizing for
+	 * cache.
+	 */
+	*indexTotalCost += dataPagesFetched * counts.arrayScans * DEFAULT_PAGE_CPU_MULTIPLIER * cpu_operator_cost;
+
 	/* Account for cache effects, the same as above */
 	if (outer_scans > 1 || counts.arrayScans > 1)
 	{
@@ -7738,19 +7784,27 @@ gincostestimate(PlannerInfo *root, IndexPath *path, double loop_count,
 	}
 
 	/* And apply random_page_cost as the cost per page */
-	*indexTotalCost = *indexStartupCost +
+	*indexTotalCost += *indexStartupCost +
 		dataPagesFetched * spc_random_page_cost;
 
 	/*
-	 * Add on index qual eval costs, much as in genericcostestimate.  But we
-	 * can disregard indexorderbys, since GIN doesn't support those.
+	 * Add on index qual eval costs, much as in genericcostestimate. We charge
+	 * cpu but we can disregard indexorderbys, since GIN doesn't support
+	 * those.
 	 */
 	qual_arg_cost = index_other_operands_eval_cost(root, indexQuals);
 	qual_op_cost = cpu_operator_cost * list_length(indexQuals);
 
 	*indexStartupCost += qual_arg_cost;
 	*indexTotalCost += qual_arg_cost;
-	*indexTotalCost += (numTuples * *indexSelectivity) * (cpu_index_tuple_cost + qual_op_cost);
+
+	/*
+	 * Add a cpu cost per search entry, corresponding to the actual visited
+	 * entries.
+	 */
+	*indexTotalCost += (counts.searchEntries * counts.arrayScans) * (qual_op_cost);
+	/* Now add a cpu cost per tuple in the posting lists / trees */
+	*indexTotalCost += (numTuples * *indexSelectivity) * (cpu_index_tuple_cost);
 	*indexPages = dataPagesFetched;
 }
 

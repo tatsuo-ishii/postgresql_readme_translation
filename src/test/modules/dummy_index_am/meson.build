@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 # FIXME: prevent install during main install, but not during test :/
 
 dummy_index_am_sources = files(

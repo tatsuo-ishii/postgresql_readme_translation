@@ -2,7 +2,7 @@
  * wait_event.c
  *	  Wait event reporting infrastructure.
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  *
  * IDENTIFICATION
@@ -230,6 +230,9 @@ pgstat_get_wait_activity(WaitEventActivity w)
 		case WAIT_EVENT_LOGICAL_LAUNCHER_MAIN:
 			event_name = "LogicalLauncherMain";
 			break;
+		case WAIT_EVENT_LOGICAL_PARALLEL_APPLY_MAIN:
+			event_name = "LogicalParallelApplyMain";
+			break;
 		case WAIT_EVENT_RECOVERY_WAL_STREAM:
 			event_name = "RecoveryWalStream";
 			break;
@@ -387,6 +390,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 			break;
 		case WAIT_EVENT_HASH_GROW_BUCKETS_REINSERT:
 			event_name = "HashGrowBucketsReinsert";
+			break;
+		case WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE:
+			event_name = "LogicalParallelApplyStateChange";
 			break;
 		case WAIT_EVENT_LOGICAL_SYNC_DATA:
 			event_name = "LogicalSyncData";

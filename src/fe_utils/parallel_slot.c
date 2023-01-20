@@ -4,7 +4,7 @@
  *		Parallel support for front-end parallel database connections
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/parallel_slot.c
@@ -475,6 +475,9 @@ ParallelSlotsWaitCompletion(ParallelSlotArray *sa)
 			continue;
 		if (!consumeQueryResult(&sa->slots[i]))
 			return false;
+		/* Mark connection as idle */
+		sa->slots[i].inUse = false;
+		ParallelSlotClearHandler(&sa->slots[i]);
 	}
 
 	return true;

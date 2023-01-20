@@ -430,6 +430,9 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
     </thead>
 
     <tbody>
+
+     <!-- everything related to global objects, alphabetically -->
+
      <row>
       <entry><structname>pg_stat_archiver</structname><indexterm><primary>pg_stat_archiver</primary></indexterm></entry>
       <entry>One row only, showing statistics about the
@@ -449,14 +452,6 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
-      <entry><structname>pg_stat_wal</structname><indexterm><primary>pg_stat_wal</primary></indexterm></entry>
-      <entry>One row only, showing statistics about WAL activity. See
-       <link linkend="monitoring-pg-stat-wal-view">
-       <structname>pg_stat_wal</structname></link> for details.
-      </entry>
-     </row>
-
-     <row>
       <entry><structname>pg_stat_database</structname><indexterm><primary>pg_stat_database</primary></indexterm></entry>
       <entry>One row per database, showing database-wide statistics. See
        <link linkend="monitoring-pg-stat-database-view">
@@ -473,6 +468,41 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        <structname>pg_stat_database_conflicts</structname></link> for details.
       </entry>
      </row>
+
+     <row>
+      <entry><structname>pg_stat_replication_slots</structname><indexterm><primary>pg_stat_replication_slots</primary></indexterm></entry>
+      <entry>One row per replication slot, showing statistics about the
+       replication slot's usage. See
+       <link linkend="monitoring-pg-stat-replication-slots-view">
+       <structname>pg_stat_replication_slots</structname></link> for details.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_slru</structname><indexterm><primary>pg_stat_slru</primary></indexterm></entry>
+      <entry>One row per SLRU, showing statistics of operations. See
+       <link linkend="monitoring-pg-stat-slru-view">
+       <structname>pg_stat_slru</structname></link> for details.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_subscription_stats</structname><indexterm><primary>pg_stat_subscription_stats</primary></indexterm></entry>
+      <entry>One row per subscription, showing statistics about errors.
+      See <link linkend="monitoring-pg-stat-subscription-stats">
+      <structname>pg_stat_subscription_stats</structname></link> for details.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_wal</structname><indexterm><primary>pg_stat_wal</primary></indexterm></entry>
+      <entry>One row only, showing statistics about WAL activity. See
+       <link linkend="monitoring-pg-stat-wal-view">
+       <structname>pg_stat_wal</structname></link> for details.
+      </entry>
+     </row>
+
+     <!-- all "stat" for schema objects, by "importance" -->
 
      <row>
       <entry><structname>pg_stat_all_tables</structname><indexterm><primary>pg_stat_all_tables</primary></indexterm></entry>
@@ -540,6 +570,25 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_user_functions</structname><indexterm><primary>pg_stat_user_functions</primary></indexterm></entry>
+      <entry>
+       One row for each tracked function, showing statistics
+       about executions of that function. See
+       <link linkend="monitoring-pg-stat-user-functions-view">
+       <structname>pg_stat_user_functions</structname></link> for details.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_xact_user_functions</structname><indexterm><primary>pg_stat_xact_user_functions</primary></indexterm></entry>
+      <entry>Similar to <structname>pg_stat_user_functions</structname>, but counts only
+      calls during the current transaction (which are <emphasis>not</emphasis>
+      yet included in <structname>pg_stat_user_functions</structname>).</entry>
+     </row>
+
+     <!-- all "statio" for schema objects, by "importance" -->
+
+     <row>
       <entry><structname>pg_statio_all_tables</structname><indexterm><primary>pg_statio_all_tables</primary></indexterm></entry>
       <entry>
        One row for each table in the current database, showing statistics
@@ -604,48 +653,6 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       <entry><structname>pg_statio_user_sequences</structname><indexterm><primary>pg_statio_user_sequences</primary></indexterm></entry>
       <entry>Same as <structname>pg_statio_all_sequences</structname>, except that only
       user sequences are shown.</entry>
-     </row>
-
-     <row>
-      <entry><structname>pg_stat_user_functions</structname><indexterm><primary>pg_stat_user_functions</primary></indexterm></entry>
-      <entry>
-       One row for each tracked function, showing statistics
-       about executions of that function. See
-       <link linkend="monitoring-pg-stat-user-functions-view">
-       <structname>pg_stat_user_functions</structname></link> for details.
-      </entry>
-     </row>
-
-     <row>
-      <entry><structname>pg_stat_xact_user_functions</structname><indexterm><primary>pg_stat_xact_user_functions</primary></indexterm></entry>
-      <entry>Similar to <structname>pg_stat_user_functions</structname>, but counts only
-      calls during the current transaction (which are <emphasis>not</emphasis>
-      yet included in <structname>pg_stat_user_functions</structname>).</entry>
-     </row>
-
-     <row>
-      <entry><structname>pg_stat_slru</structname><indexterm><primary>pg_stat_slru</primary></indexterm></entry>
-      <entry>One row per SLRU, showing statistics of operations. See
-       <link linkend="monitoring-pg-stat-slru-view">
-       <structname>pg_stat_slru</structname></link> for details.
-      </entry>
-     </row>
-
-     <row>
-      <entry><structname>pg_stat_replication_slots</structname><indexterm><primary>pg_stat_replication_slots</primary></indexterm></entry>
-      <entry>One row per replication slot, showing statistics about the
-       replication slot's usage. See
-       <link linkend="monitoring-pg-stat-replication-slots-view">
-       <structname>pg_stat_replication_slots</structname></link> for details.
-      </entry>
-     </row>
-
-     <row>
-      <entry><structname>pg_stat_subscription_stats</structname><indexterm><primary>pg_stat_subscription_stats</primary></indexterm></entry>
-      <entry>One row per subscription, showing statistics about errors.
-      See <link linkend="monitoring-pg-stat-subscription-stats">
-      <structname>pg_stat_subscription_stats</structname></link> for details.
-      </entry>
      </row>
 
     </tbody>
@@ -736,9 +743,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        <structfield>leader_pid</structfield> <type>integer</type>
       </para>
       <para>
-       Process ID of the parallel group leader, if this process is a
-       parallel query worker.  <literal>NULL</literal> if this process is a
-       parallel group leader or does not participate in parallel query.
+       Process ID of the parallel group leader if this process is a parallel
+       query worker, or process ID of the leader apply worker if this process
+       is a parallel apply worker.  <literal>NULL</literal> indicates that this
+       process is a parallel group leader or leader apply worker, or does not
+       participate in any parallel operation.
       </para></entry>
      </row>
 
@@ -1123,6 +1132,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      <row>
       <entry><literal>LogicalLauncherMain</literal></entry>
       <entry>Waiting in main loop of logical replication launcher process.</entry>
+     </row>
+     <row>
+      <entry><literal>LogicalParallelApplyMain</literal></entry>
+      <entry>Waiting in main loop of logical replication parallel apply
+       process.</entry>
      </row>
      <row>
       <entry><literal>RecoveryWalStream</literal></entry>
@@ -1721,6 +1735,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        tuples into new buckets.</entry>
      </row>
      <row>
+      <entry><literal>LogicalParallelApplyStateChange</literal></entry>
+      <entry>Waiting for a logical replication parallel apply process to change
+       state.</entry>
+     </row>
+     <row>
       <entry><literal>LogicalSyncData</literal></entry>
       <entry>Waiting for a logical replication remote server to send data for
        initial table synchronization.</entry>
@@ -1850,6 +1869,11 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      <row>
       <entry><literal>advisory</literal></entry>
       <entry>Waiting to acquire an advisory user lock.</entry>
+     </row>
+     <row>
+      <entry><literal>applytransaction</literal></entry>
+      <entry>Waiting to acquire a lock on a remote transaction being applied
+      by a logical replication subscriber.</entry>
      </row>
      <row>
       <entry><literal>extend</literal></entry>
@@ -3186,11 +3210,22 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>leader_pid</structfield> <type>integer</type>
+      </para>
+      <para>
+       Process ID of the leader apply worker if this process is a parallel
+       apply worker; NULL if this process is a leader apply worker or a
+       synchronization worker
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
        <structfield>relid</structfield> <type>oid</type>
       </para>
       <para>
-       OID of the relation that the worker is synchronizing; null for the
-       main apply worker
+       OID of the relation that the worker is synchronizing; NULL for the
+       leader apply worker and parallel apply workers
       </para></entry>
      </row>
 
@@ -3200,7 +3235,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
       </para>
       <para>
        Last write-ahead log location received, the initial value of
-       this field being 0
+       this field being 0; NULL for parallel apply workers
       </para></entry>
      </row>
 
@@ -3209,7 +3244,8 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>last_msg_send_time</structfield> <type>timestamp with time zone</type>
       </para>
       <para>
-       Send time of last message received from origin WAL sender
+       Send time of last message received from origin WAL sender; NULL for
+       parallel apply workers
       </para></entry>
      </row>
 
@@ -3218,7 +3254,8 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>last_msg_receipt_time</structfield> <type>timestamp with time zone</type>
       </para>
       <para>
-       Receipt time of last message received from origin WAL sender
+       Receipt time of last message received from origin WAL sender; NULL for
+       parallel apply workers
       </para></entry>
      </row>
 
@@ -3227,7 +3264,8 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
        <structfield>latest_end_lsn</structfield> <type>pg_lsn</type>
       </para>
       <para>
-       Last write-ahead log location reported to origin WAL sender
+       Last write-ahead log location reported to origin WAL sender; NULL for
+       parallel apply workers
       </para></entry>
      </row>
 
@@ -3237,7 +3275,7 @@ SELECT pid, wait_event_type, wait_event FROM pg_stat_activity WHERE wait_event i
       </para>
       <para>
        Time of last write-ahead log location reported to origin WAL
-       sender
+       sender; NULL for parallel apply workers
       </para></entry>
      </row>
     </tbody>
@@ -5668,6 +5706,24 @@ FROM pg_stat_get_backend_idset() AS backendid;
        </para>
        <para>
         Returns the time when this process was started.
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_get_backend_subxact</primary>
+        </indexterm>
+        <function>pg_stat_get_backend_subxact</function> ( <type>integer</type> )
+        <returnvalue>record</returnvalue>
+       </para>
+       <para>
+        Returns a record of information about the subtransactions of the
+        backend with the specified ID.
+        The fields returned are <parameter>subxact_count</parameter>, which
+        is the number of subtransactions in the backend's subtransaction cache,
+        and <parameter>subxact_overflow</parameter>, which indicates whether
+        the backend's subtransaction cache is overflowed or not.
        </para></entry>
       </row>
 

@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 oid2name_sources = files(
   'oid2name.c',
 )

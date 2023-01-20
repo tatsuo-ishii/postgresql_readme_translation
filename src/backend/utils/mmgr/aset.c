@@ -7,7 +7,7 @@
  * type.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -306,7 +306,7 @@ AllocSetFreeIndex(Size size)
 					tsize;
 
 		/* Statically assert that we only have a 16-bit input value. */
-		StaticAssertStmt(ALLOC_CHUNK_LIMIT < (1 << 16),
+		StaticAssertDecl(ALLOC_CHUNK_LIMIT < (1 << 16),
 						 "ALLOC_CHUNK_LIMIT must be less than 64kB");
 
 		tsize = size - 1;
@@ -358,10 +358,10 @@ AllocSetContextCreateInternal(MemoryContext parent,
 	AllocBlock	block;
 
 	/* ensure MemoryChunk's size is properly maxaligned */
-	StaticAssertStmt(ALLOC_CHUNKHDRSZ == MAXALIGN(ALLOC_CHUNKHDRSZ),
+	StaticAssertDecl(ALLOC_CHUNKHDRSZ == MAXALIGN(ALLOC_CHUNKHDRSZ),
 					 "sizeof(MemoryChunk) is not maxaligned");
 	/* check we have enough space to store the freelist link */
-	StaticAssertStmt(sizeof(AllocFreeListLink) <= (1 << ALLOC_MINBITS),
+	StaticAssertDecl(sizeof(AllocFreeListLink) <= (1 << ALLOC_MINBITS),
 					 "sizeof(AllocFreeListLink) larger than minimum allocation size");
 
 	/*
@@ -1024,10 +1024,8 @@ AllocSetFree(void *pointer)
 
 #ifdef MEMORY_CONTEXT_CHECKING
 		{
-			Size		chunk_size = block->endptr - (char *) pointer;
-
 			/* Test for someone scribbling on unused space in chunk */
-			Assert(chunk->requested_size < chunk_size);
+			Assert(chunk->requested_size < (block->endptr - (char *) pointer));
 			if (!sentinel_ok(pointer, chunk->requested_size))
 				elog(WARNING, "detected write past chunk end in %s %p",
 					 set->header.name, chunk);

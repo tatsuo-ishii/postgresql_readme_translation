@@ -88,7 +88,7 @@
  * produce exactly one output run from their partial input.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1439,13 +1439,13 @@ tuplesort_performsort(Tuplesortstate *state)
 			 * We were able to accumulate all the tuples required for output
 			 * in memory, using a heap to eliminate excess tuples.  Now we
 			 * have to transform the heap to a properly-sorted array.
+			 * Note that sort_bounded_heap sets the correct state->status.
 			 */
 			sort_bounded_heap(state);
 			state->current = 0;
 			state->eof_reached = false;
 			state->markpos_offset = 0;
 			state->markpos_eof = false;
-			state->status = TSS_SORTEDINMEM;
 			break;
 
 		case TSS_BUILDRUNS:
@@ -2908,7 +2908,7 @@ markrunend(LogicalTape *tape)
 {
 	unsigned int len = 0;
 
-	LogicalTapeWrite(tape, (void *) &len, sizeof(len));
+	LogicalTapeWrite(tape, &len, sizeof(len));
 }
 
 /*

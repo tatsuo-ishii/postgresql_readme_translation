@@ -20,7 +20,7 @@
  * appropriate value for a free lock.  The meaning of the variable is up to
  * the caller, the lightweight lock code just assigns and compares it.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -107,6 +107,9 @@ extern slock_t *ShmemLock;
 #define LW_LOCK_MASK				((uint32) ((1 << 25)-1))
 /* Must be greater than MAX_BACKENDS - which is 2^23-1, so we're fine. */
 #define LW_SHARED_MASK				((uint32) ((1 << 24)-1))
+
+StaticAssertDecl(LW_VAL_EXCLUSIVE > (uint32) MAX_BACKENDS,
+				 "MAX_BACKENDS too big for lwlock.c");
 
 /*
  * There are three sorts of LWLock "tranches":
@@ -466,12 +469,6 @@ LWLockShmemSize(void)
 void
 CreateLWLocks(void)
 {
-	StaticAssertStmt(LW_VAL_EXCLUSIVE > (uint32) MAX_BACKENDS,
-					 "MAX_BACKENDS too big for lwlock.c");
-
-	StaticAssertStmt(sizeof(LWLock) <= LWLOCK_PADDED_SIZE,
-					 "Miscalculated LWLock padding");
-
 	if (!IsUnderPostmaster)
 	{
 		Size		spaceLocks = LWLockShmemSize();

@@ -1,8 +1,9 @@
 
-# Copyright (c) 2021-2022, PostgreSQL Global Development Group
+# Copyright (c) 2021-2023, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
+use File::Copy;
 use PostgreSQL::Test::Utils;
 use PostgreSQL::Test::Cluster;
 use Test::More;
@@ -20,9 +21,15 @@ elsif ($ENV{PG_TEST_EXTRA} !~ /\bldap\b/)
 {
 	plan skip_all => 'Potentially unsafe test LDAP not enabled in PG_TEST_EXTRA';
 }
+elsif ($^O eq 'darwin' && -d '/opt/homebrew/opt/openldap')
+{
+	# typical paths for Homebrew on ARM
+	$slapd           = '/opt/homebrew/opt/openldap/libexec/slapd';
+	$ldap_schema_dir = '/opt/homebrew/etc/openldap/schema';
+}
 elsif ($^O eq 'darwin' && -d '/usr/local/opt/openldap')
 {
-	# typical paths for Homebrew
+	# typical paths for Homebrew on Intel
 	$slapd           = '/usr/local/opt/openldap/libexec/slapd';
 	$ldap_schema_dir = '/usr/local/etc/openldap/schema';
 }
@@ -113,17 +120,13 @@ append_to_file(
 mkdir $ldap_datadir or die;
 mkdir $slapd_certs  or die;
 
-my $openssl = $ENV{OPENSSL};
-
-system_or_bail $openssl, "req", "-new", "-nodes", "-keyout",
-  "$slapd_certs/ca.key", "-x509", "-out", "$slapd_certs/ca.crt", "-subj",
-  "/CN=CA";
-system_or_bail $openssl, "req", "-new", "-nodes", "-keyout",
-  "$slapd_certs/server.key", "-out", "$slapd_certs/server.csr", "-subj",
-  "/CN=server";
-system_or_bail $openssl, "x509", "-req", "-in", "$slapd_certs/server.csr",
-  "-CA", "$slapd_certs/ca.crt", "-CAkey", "$slapd_certs/ca.key",
-  "-CAcreateserial", "-out", "$slapd_certs/server.crt";
+# use existing certs from nearby SSL test suite
+copy "../ssl/ssl/server_ca.crt", "$slapd_certs/ca.crt"
+  || die "copying ca.crt: $!";
+copy "../ssl/ssl/server-cn-only.crt", "$slapd_certs/server.crt"
+  || die "copying server.crt: $!";;
+copy "../ssl/ssl/server-cn-only.key", "$slapd_certs/server.key"
+  || die "copying server.key: $!";;
 
 system_or_bail $slapd, '-f', $slapd_conf, '-h', "$ldap_url $ldaps_url";
 

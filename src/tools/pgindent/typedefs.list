@@ -1456,6 +1456,7 @@ LogicalDecodeStreamStopCB
 LogicalDecodeStreamTruncateCB
 LogicalDecodeTruncateCB
 LogicalDecodingContext
+LogicalDecodingMode
 LogicalErrorCallbackState
 LogicalOutputPluginInit
 LogicalOutputPluginWriterPrepareWrite
@@ -1472,6 +1473,7 @@ LogicalRepRelId
 LogicalRepRelMapEntry
 LogicalRepRelation
 LogicalRepRollbackPreparedTxnData
+LogicalRepStreamAbortData
 LogicalRepTupleData
 LogicalRepTyp
 LogicalRepWorker
@@ -1844,7 +1846,6 @@ PROCESS_INFORMATION
 PROCLOCK
 PROCLOCKTAG
 PROC_HDR
-PROC_QUEUE
 PSID
 PSID_AND_ATTRIBUTES
 PSQL_COMP_CASE
@@ -1875,6 +1876,9 @@ PageXLogRecPtr
 PagetableEntry
 Pairs
 ParallelAppendState
+ParallelApplyWorkerEntry
+ParallelApplyWorkerInfo
+ParallelApplyWorkerShared
 ParallelBitmapHeapState
 ParallelBlockTableScanDesc
 ParallelBlockTableScanWorker
@@ -1894,6 +1898,7 @@ ParallelSlotResultHandler
 ParallelState
 ParallelTableScanDesc
 ParallelTableScanDescData
+ParallelTransState
 ParallelVacuumState
 ParallelWorkerContext
 ParallelWorkerInfo
@@ -1923,6 +1928,7 @@ ParserState
 PartClauseInfo
 PartClauseMatchStatus
 PartClauseTarget
+PartialFileSetState
 PartitionBoundInfo
 PartitionBoundInfoData
 PartitionBoundSpec
@@ -2371,7 +2377,6 @@ SERIALIZABLEXIDTAG
 SERVICE_STATUS
 SERVICE_STATUS_HANDLE
 SERVICE_TABLE_ENTRY
-SHM_QUEUE
 SID_AND_ATTRIBUTES
 SID_IDENTIFIER_AUTHORITY
 SID_NAME_USE
@@ -2773,6 +2778,7 @@ TocEntry
 TokenAuxData
 TokenizedAuthLine
 TrackItem
+TransApplyAction
 TransInvalidationInfo
 TransState
 TransactionId

@@ -1430,6 +1430,15 @@ SELECT makeaclitem('regress_priv_user1'::regrole, 'regress_priv_user2'::regrole,
 SELECT makeaclitem('regress_priv_user1'::regrole, 'regress_priv_user2'::regrole,
 	'SELECT, fake_privilege', FALSE);  -- error
 
+-- Test non-throwing aclitem I/O
+SELECT pg_input_is_valid('regress_priv_user1=r/regress_priv_user2', 'aclitem');
+SELECT pg_input_is_valid('regress_priv_user1=r/', 'aclitem');
+SELECT pg_input_error_message('regress_priv_user1=r/', 'aclitem');
+SELECT pg_input_is_valid('regress_priv_user1=r/regress_no_such_user', 'aclitem');
+SELECT pg_input_error_message('regress_priv_user1=r/regress_no_such_user', 'aclitem');
+SELECT pg_input_is_valid('regress_priv_user1=rY', 'aclitem');
+SELECT pg_input_error_message('regress_priv_user1=rY', 'aclitem');
+
 --
 -- Testing blanket default grants is very hazardous since it might change
 -- the privileges attached to objects created by concurrent regression tests.
@@ -1698,11 +1707,11 @@ CREATE TABLE lock_table (a int);
 GRANT SELECT ON lock_table TO regress_locktable_user;
 SET SESSION AUTHORIZATION regress_locktable_user;
 BEGIN;
-LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should fail
-ROLLBACK;
-BEGIN;
 LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should pass
 COMMIT;
+BEGIN;
+LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should fail
+ROLLBACK;
 BEGIN;
 LOCK TABLE lock_table IN ACCESS EXCLUSIVE MODE; -- should fail
 ROLLBACK;
@@ -1713,11 +1722,11 @@ REVOKE SELECT ON lock_table FROM regress_locktable_user;
 GRANT INSERT ON lock_table TO regress_locktable_user;
 SET SESSION AUTHORIZATION regress_locktable_user;
 BEGIN;
+LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should pass
+ROLLBACK;
+BEGIN;
 LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should pass
 COMMIT;
-BEGIN;
-LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should fail
-ROLLBACK;
 BEGIN;
 LOCK TABLE lock_table IN ACCESS EXCLUSIVE MODE; -- should fail
 ROLLBACK;
@@ -1728,11 +1737,11 @@ REVOKE INSERT ON lock_table FROM regress_locktable_user;
 GRANT UPDATE ON lock_table TO regress_locktable_user;
 SET SESSION AUTHORIZATION regress_locktable_user;
 BEGIN;
+LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should pass
+ROLLBACK;
+BEGIN;
 LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should pass
 COMMIT;
-BEGIN;
-LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should fail
-ROLLBACK;
 BEGIN;
 LOCK TABLE lock_table IN ACCESS EXCLUSIVE MODE; -- should pass
 COMMIT;
@@ -1743,11 +1752,11 @@ REVOKE UPDATE ON lock_table FROM regress_locktable_user;
 GRANT DELETE ON lock_table TO regress_locktable_user;
 SET SESSION AUTHORIZATION regress_locktable_user;
 BEGIN;
+LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should pass
+ROLLBACK;
+BEGIN;
 LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should pass
 COMMIT;
-BEGIN;
-LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should fail
-ROLLBACK;
 BEGIN;
 LOCK TABLE lock_table IN ACCESS EXCLUSIVE MODE; -- should pass
 COMMIT;
@@ -1758,16 +1767,31 @@ REVOKE DELETE ON lock_table FROM regress_locktable_user;
 GRANT TRUNCATE ON lock_table TO regress_locktable_user;
 SET SESSION AUTHORIZATION regress_locktable_user;
 BEGIN;
+LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should pass
+ROLLBACK;
+BEGIN;
 LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should pass
 COMMIT;
-BEGIN;
-LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should fail
-ROLLBACK;
 BEGIN;
 LOCK TABLE lock_table IN ACCESS EXCLUSIVE MODE; -- should pass
 COMMIT;
 \c
 REVOKE TRUNCATE ON lock_table FROM regress_locktable_user;
+
+-- LOCK TABLE and MAINTAIN permission
+GRANT MAINTAIN ON lock_table TO regress_locktable_user;
+SET SESSION AUTHORIZATION regress_locktable_user;
+BEGIN;
+LOCK TABLE lock_table IN ACCESS SHARE MODE; -- should pass
+ROLLBACK;
+BEGIN;
+LOCK TABLE lock_table IN ROW EXCLUSIVE MODE; -- should pass
+COMMIT;
+BEGIN;
+LOCK TABLE lock_table IN ACCESS EXCLUSIVE MODE; -- should pass
+COMMIT;
+\c
+REVOKE MAINTAIN ON lock_table FROM regress_locktable_user;
 
 -- clean up
 DROP TABLE lock_table;
@@ -1853,66 +1877,55 @@ DROP ROLE regress_roleoption_protagonist;
 DROP ROLE regress_roleoption_donor;
 DROP ROLE regress_roleoption_recipient;
 
--- VACUUM and ANALYZE
-CREATE ROLE regress_no_priv;
-CREATE ROLE regress_only_vacuum;
-CREATE ROLE regress_only_analyze;
-CREATE ROLE regress_both;
-CREATE ROLE regress_only_vacuum_all IN ROLE pg_vacuum_all_tables;
-CREATE ROLE regress_only_analyze_all IN ROLE pg_analyze_all_tables;
-CREATE ROLE regress_both_all IN ROLE pg_vacuum_all_tables, pg_analyze_all_tables;
+-- MAINTAIN
+CREATE ROLE regress_no_maintain;
+CREATE ROLE regress_maintain;
+CREATE ROLE regress_maintain_all IN ROLE pg_maintain;
 
-CREATE TABLE vacanalyze_test (a INT);
-GRANT VACUUM ON vacanalyze_test TO regress_only_vacuum, regress_both;
-GRANT ANALYZE ON vacanalyze_test TO regress_only_analyze, regress_both;
+CREATE TABLE maintain_test (a INT);
+CREATE INDEX ON maintain_test (a);
+GRANT MAINTAIN ON maintain_test TO regress_maintain;
+CREATE MATERIALIZED VIEW refresh_test AS SELECT 1;
+GRANT MAINTAIN ON refresh_test TO regress_maintain;
+CREATE SCHEMA reindex_test;
 
-SET ROLE regress_no_priv;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
+-- negative tests; should fail
+SET ROLE regress_no_maintain;
+VACUUM maintain_test;
+ANALYZE maintain_test;
+VACUUM (ANALYZE) maintain_test;
+CLUSTER maintain_test USING maintain_test_a_idx;
+REFRESH MATERIALIZED VIEW refresh_test;
+REINDEX TABLE maintain_test;
+REINDEX INDEX maintain_test_a_idx;
+REINDEX SCHEMA reindex_test;
 RESET ROLE;
 
-SET ROLE regress_only_vacuum;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
+SET ROLE regress_maintain;
+VACUUM maintain_test;
+ANALYZE maintain_test;
+VACUUM (ANALYZE) maintain_test;
+CLUSTER maintain_test USING maintain_test_a_idx;
+REFRESH MATERIALIZED VIEW refresh_test;
+REINDEX TABLE maintain_test;
+REINDEX INDEX maintain_test_a_idx;
+REINDEX SCHEMA reindex_test;
 RESET ROLE;
 
-SET ROLE regress_only_analyze;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
+SET ROLE regress_maintain_all;
+VACUUM maintain_test;
+ANALYZE maintain_test;
+VACUUM (ANALYZE) maintain_test;
+CLUSTER maintain_test USING maintain_test_a_idx;
+REFRESH MATERIALIZED VIEW refresh_test;
+REINDEX TABLE maintain_test;
+REINDEX INDEX maintain_test_a_idx;
+REINDEX SCHEMA reindex_test;
 RESET ROLE;
 
-SET ROLE regress_both;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
-RESET ROLE;
-
-SET ROLE regress_only_vacuum_all;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
-RESET ROLE;
-
-SET ROLE regress_only_analyze_all;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
-RESET ROLE;
-
-SET ROLE regress_both_all;
-VACUUM vacanalyze_test;
-ANALYZE vacanalyze_test;
-VACUUM (ANALYZE) vacanalyze_test;
-RESET ROLE;
-
-DROP TABLE vacanalyze_test;
-DROP ROLE regress_no_priv;
-DROP ROLE regress_only_vacuum;
-DROP ROLE regress_only_analyze;
-DROP ROLE regress_both;
-DROP ROLE regress_only_vacuum_all;
-DROP ROLE regress_only_analyze_all;
-DROP ROLE regress_both_all;
+DROP TABLE maintain_test;
+DROP MATERIALIZED VIEW refresh_test;
+DROP SCHEMA reindex_test;
+DROP ROLE regress_no_maintain;
+DROP ROLE regress_maintain;
+DROP ROLE regress_maintain_all;

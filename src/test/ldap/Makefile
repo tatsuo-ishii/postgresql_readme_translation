@@ -2,7 +2,7 @@
 #
 # Makefile for src/test/ldap
 #
-# Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 # src/test/ldap/Makefile
@@ -14,7 +14,6 @@ top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
 export with_ldap
-export OPENSSL
 
 check:
 	$(prove_check)

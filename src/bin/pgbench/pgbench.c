@@ -5,7 +5,7 @@
  * Originally written by Tatsuo Ishii and enhanced by many contributors.
  *
  * src/bin/pgbench/pgbench.c
- * Copyright (c) 2000-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  * ALL RIGHTS RESERVED;
  *
  * Permission to use, copy, modify, and distribute this software and its
@@ -68,6 +68,7 @@
 #include "port/pg_bitutils.h"
 #include "portability/instr_time.h"
 
+/* X/Open (XSI) requires <math.h> to provide M_PI, but core POSIX does not */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -1135,8 +1136,8 @@ getGaussianRand(pg_prng_state *state, int64 min, int64 max,
 	Assert(parameter >= MIN_GAUSSIAN_PARAM);
 
 	/*
-	 * Get user specified random number from this loop, with -parameter <
-	 * stdev <= parameter
+	 * Get normally-distributed random number in the range -parameter <= stdev
+	 * < parameter.
 	 *
 	 * This loop is executed until the number is in the expected range.
 	 *
@@ -1148,25 +1149,7 @@ getGaussianRand(pg_prng_state *state, int64 min, int64 max,
 	 */
 	do
 	{
-		/*
-		 * pg_prng_double generates [0, 1), but for the basic version of the
-		 * Box-Muller transform the two uniformly distributed random numbers
-		 * are expected to be in (0, 1] (see
-		 * https://en.wikipedia.org/wiki/Box-Muller_transform)
-		 */
-		double		rand1 = 1.0 - pg_prng_double(state);
-		double		rand2 = 1.0 - pg_prng_double(state);
-
-		/* Box-Muller basic form transform */
-		double		var_sqrt = sqrt(-2.0 * log(rand1));
-
-		stdev = var_sqrt * sin(2.0 * M_PI * rand2);
-
-		/*
-		 * we may try with cos, but there may be a bias induced if the
-		 * previous value fails the test. To be on the safe side, let us try
-		 * over.
-		 */
+		stdev = pg_prng_double_normal(state);
 	}
 	while (stdev < -parameter || stdev >= parameter);
 

@@ -112,7 +112,7 @@
  * }
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -162,7 +162,7 @@ typedef struct dlist_head
 
 
 /*
- * Doubly linked list iterator type for dlist_head and and dclist_head types.
+ * Doubly linked list iterator type for dlist_head and dclist_head types.
  *
  * Used as state in dlist_foreach() and dlist_reverse_foreach() (and the
  * dclist variant thereof).
@@ -286,12 +286,12 @@ typedef struct slist_mutable_iter
 /* Prototypes for functions too big to be inline */
 
 /* Caution: this is O(n); consider using slist_delete_current() instead */
-extern void slist_delete(slist_head *head, slist_node *node);
+extern void slist_delete(slist_head *head, const slist_node *node);
 
 #ifdef ILIST_DEBUG
-extern void dlist_member_check(dlist_head *head, dlist_node *node);
-extern void dlist_check(dlist_head *head);
-extern void slist_check(slist_head *head);
+extern void dlist_member_check(const dlist_head *head, const dlist_node *node);
+extern void dlist_check(const dlist_head *head);
+extern void slist_check(const slist_head *head);
 #else
 /*
  * These seemingly useless casts to void are here to keep the compiler quiet
@@ -317,12 +317,23 @@ dlist_init(dlist_head *head)
 }
 
 /*
+ * Initialize a doubly linked list element.
+ *
+ * This is only needed when dlist_node_is_detached() may be needed.
+ */
+static inline void
+dlist_node_init(dlist_node *node)
+{
+	node->next = node->prev = NULL;
+}
+
+/*
  * Is the list empty?
  *
  * An empty list has either its first 'next' pointer set to NULL, or to itself.
  */
 static inline bool
-dlist_is_empty(dlist_head *head)
+dlist_is_empty(const dlist_head *head)
 {
 	dlist_check(head);
 
@@ -398,6 +409,19 @@ dlist_delete(dlist_node *node)
 }
 
 /*
+ * Like dlist_delete(), but also sets next/prev to NULL to signal not being in
+ * a list.
+ */
+static inline void
+dlist_delete_thoroughly(dlist_node *node)
+{
+	node->prev->next = node->next;
+	node->next->prev = node->prev;
+	node->next = NULL;
+	node->prev = NULL;
+}
+
+/*
  * Same as dlist_delete, but performs checks in ILIST_DEBUG builds to ensure
  * that 'node' belongs to 'head'.
  */
@@ -406,6 +430,17 @@ dlist_delete_from(dlist_head *head, dlist_node *node)
 {
 	dlist_member_check(head, node);
 	dlist_delete(node);
+}
+
+/*
+ * Like dlist_delete_from, but also sets next/prev to NULL to signal not
+ * being in a list.
+ */
+static inline void
+dlist_delete_from_thoroughly(dlist_head *head, dlist_node *node)
+{
+	dlist_member_check(head, node);
+	dlist_delete_thoroughly(node);
 }
 
 /*
@@ -465,7 +500,7 @@ dlist_move_tail(dlist_head *head, dlist_node *node)
  * Caution: unreliable if 'node' is not in the list.
  */
 static inline bool
-dlist_has_next(dlist_head *head, dlist_node *node)
+dlist_has_next(const dlist_head *head, const dlist_node *node)
 {
 	return node->next != &head->head;
 }
@@ -475,9 +510,24 @@ dlist_has_next(dlist_head *head, dlist_node *node)
  * Caution: unreliable if 'node' is not in the list.
  */
 static inline bool
-dlist_has_prev(dlist_head *head, dlist_node *node)
+dlist_has_prev(const dlist_head *head, const dlist_node *node)
 {
 	return node->prev != &head->head;
+}
+
+/*
+ * Check if node is detached. A node is only detached if it either has been
+ * initialized with dlist_init_node(), or deleted with
+ * dlist_delete_thoroughly() / dlist_delete_from_thoroughly() /
+ * dclist_delete_from_thoroughly().
+ */
+static inline bool
+dlist_node_is_detached(const dlist_node *node)
+{
+	Assert((node->next == NULL && node->prev == NULL) ||
+		   (node->next != NULL && node->prev != NULL));
+
+	return node->next == NULL;
 }
 
 /*
@@ -629,7 +679,7 @@ dclist_init(dclist_head *head)
  *		Returns true if the list is empty, otherwise false.
  */
 static inline bool
-dclist_is_empty(dclist_head *head)
+dclist_is_empty(const dclist_head *head)
 {
 	Assert(dlist_is_empty(&head->dlist) == (head->count == 0));
 	return (head->count == 0);
@@ -719,6 +769,19 @@ dclist_delete_from(dclist_head *head, dlist_node *node)
 }
 
 /*
+ * Like dclist_delete_from(), but also sets next/prev to NULL to signal not
+ * being in a list.
+ */
+static inline void
+dclist_delete_from_thoroughly(dclist_head *head, dlist_node *node)
+{
+	Assert(head->count > 0);
+
+	dlist_delete_from_thoroughly(&head->dlist, node);
+	head->count--;
+}
+
+/*
  * dclist_pop_head_node
  *		Remove and return the first node from a list (there must be one).
  */
@@ -773,7 +836,7 @@ dclist_move_tail(dclist_head *head, dlist_node *node)
  * Caution: 'node' must be a member of 'head'.
  */
 static inline bool
-dclist_has_next(dclist_head *head, dlist_node *node)
+dclist_has_next(const dclist_head *head, const dlist_node *node)
 {
 	dlist_member_check(&head->dlist, node);
 	Assert(head->count > 0);
@@ -788,7 +851,7 @@ dclist_has_next(dclist_head *head, dlist_node *node)
  * Caution: 'node' must be a member of 'head'.
  */
 static inline bool
-dclist_has_prev(dclist_head *head, dlist_node *node)
+dclist_has_prev(const dclist_head *head, const dlist_node *node)
 {
 	dlist_member_check(&head->dlist, node);
 	Assert(head->count > 0);
@@ -866,7 +929,7 @@ dclist_tail_node(dclist_head *head)
  *		Returns the stored number of entries in 'head'
  */
 static inline uint32
-dclist_count(dclist_head *head)
+dclist_count(const dclist_head *head)
 {
 	Assert(dlist_is_empty(&head->dlist) == (head->count == 0));
 
@@ -929,7 +992,7 @@ slist_init(slist_head *head)
  * Is the list empty?
  */
 static inline bool
-slist_is_empty(slist_head *head)
+slist_is_empty(const slist_head *head)
 {
 	slist_check(head);
 
@@ -977,7 +1040,7 @@ slist_pop_head_node(slist_head *head)
  * Check whether 'node' has a following node.
  */
 static inline bool
-slist_has_next(slist_head *head, slist_node *node)
+slist_has_next(const slist_head *head, const slist_node *node)
 {
 	slist_check(head);
 

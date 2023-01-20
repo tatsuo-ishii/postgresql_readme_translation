@@ -1,7 +1,7 @@
 /*
  * PostgreSQL System Views
  *
- * Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Copyright (c) 1996-2023, PostgreSQL Global Development Group
  *
  * src/backend/catalog/system_views.sql
  *
@@ -371,9 +371,8 @@ CREATE VIEW pg_publication_tables AS
         C.relname AS tablename,
         ( SELECT array_agg(a.attname ORDER BY a.attnum)
           FROM pg_attribute a
-          WHERE a.attrelid = GPT.relid AND a.attnum > 0 AND
-                NOT a.attisdropped AND
-                (a.attnum = ANY(GPT.attrs) OR GPT.attrs IS NULL)
+          WHERE a.attrelid = GPT.relid AND
+                a.attnum = ANY(GPT.attrs)
         ) AS attnames,
         pg_get_expr(GPT.qual, GPT.relid) AS rowfilter
     FROM pg_publication P,
@@ -949,6 +948,7 @@ CREATE VIEW pg_stat_subscription AS
             su.oid AS subid,
             su.subname,
             st.pid,
+            st.leader_pid,
             st.relid,
             st.received_lsn,
             st.last_msg_send_time,

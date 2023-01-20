@@ -3,7 +3,7 @@
  *
  *	Definitions for the PostgreSQL cumulative statistics system.
  *
- *	Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ *	Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  *	src/include/pgstat.h
  * ----------
@@ -475,6 +475,7 @@ extern void pgstat_report_connect(Oid dboid);
 	(pgStatTransactionIdleTime += (n))
 
 extern PgStat_StatDBEntry *pgstat_fetch_stat_dbentry(Oid dboid);
+
 
 /*
  * Functions in pgstat_function.c

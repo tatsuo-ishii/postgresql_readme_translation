@@ -6,7 +6,7 @@
  * archive_command GUC) to copy write-ahead log files.  It is used as the
  * default, but other modules may define their own custom archiving logic.
  *
- * Copyright (c) 2022, PostgreSQL Global Development Group
+ * Copyright (c) 2022-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/postmaster/shell_archive.c
@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 
 #include "access/xlog.h"
+#include "common/percentrepl.h"
 #include "pgstat.h"
 #include "postmaster/pgarch.h"
 
@@ -44,58 +45,20 @@ shell_archive_configured(void)
 static bool
 shell_archive_file(const char *file, const char *path)
 {
-	char		xlogarchcmd[MAXPGPATH];
-	char	   *dp;
-	char	   *endp;
-	const char *sp;
+	char	   *xlogarchcmd;
+	char	   *nativePath = NULL;
 	int			rc;
 
-	/*
-	 * construct the command to be executed
-	 */
-	dp = xlogarchcmd;
-	endp = xlogarchcmd + MAXPGPATH - 1;
-	*endp = '\0';
-
-	for (sp = XLogArchiveCommand; *sp; sp++)
+	if (path)
 	{
-		if (*sp == '%')
-		{
-			switch (sp[1])
-			{
-				case 'p':
-					/* %p: relative path of source file */
-					sp++;
-					strlcpy(dp, path, endp - dp);
-					make_native_path(dp);
-					dp += strlen(dp);
-					break;
-				case 'f':
-					/* %f: filename of source file */
-					sp++;
-					strlcpy(dp, file, endp - dp);
-					dp += strlen(dp);
-					break;
-				case '%':
-					/* convert %% to a single % */
-					sp++;
-					if (dp < endp)
-						*dp++ = *sp;
-					break;
-				default:
-					/* otherwise treat the % as not special */
-					if (dp < endp)
-						*dp++ = *sp;
-					break;
-			}
-		}
-		else
-		{
-			if (dp < endp)
-				*dp++ = *sp;
-		}
+		nativePath = pstrdup(path);
+		make_native_path(nativePath);
 	}
-	*dp = '\0';
+
+	xlogarchcmd = replace_percent_placeholders(XLogArchiveCommand, "archive_command", "fp", file, nativePath);
+
+	if (nativePath)
+		pfree(nativePath);
 
 	ereport(DEBUG3,
 			(errmsg_internal("executing archive command \"%s\"",
@@ -154,6 +117,8 @@ shell_archive_file(const char *file, const char *path)
 
 		return false;
 	}
+
+	pfree(xlogarchcmd);
 
 	elog(DEBUG1, "archived write-ahead log file \"%s\"", file);
 	return true;

@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 pg_config_ext = configure_file(
   input: 'pg_config_ext.h.meson',
   output: 'pg_config_ext.h',
@@ -111,6 +113,7 @@ install_headers(
   'postgres.h',
   'postgres_ext.h',
   'postgres_fe.h',
+  'varatt.h',
   'windowapi.h',
   pg_config_ext,
   pg_config_os,

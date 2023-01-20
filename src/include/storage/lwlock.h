@@ -4,7 +4,7 @@
  *	  Lightweight lock manager
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/lwlock.h
@@ -58,6 +58,9 @@ typedef struct LWLock
  * locks is small but some are heavily contended.
  */
 #define LWLOCK_PADDED_SIZE	PG_CACHE_LINE_SIZE
+
+StaticAssertDecl(sizeof(LWLock) <= LWLOCK_PADDED_SIZE,
+				 "Miscalculated LWLock padding");
 
 /* LWLock, padded to a full cache line size */
 typedef union LWLockPadded

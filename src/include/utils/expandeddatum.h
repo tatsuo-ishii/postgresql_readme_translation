@@ -34,7 +34,7 @@
  * value if they fail partway through.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/expandeddatum.h
@@ -43,6 +43,8 @@
  */
 #ifndef EXPANDEDDATUM_H
 #define EXPANDEDDATUM_H
+
+#include "varatt.h"
 
 /* Size of an EXTERNAL datum that contains a pointer to an expanded object */
 #define EXPANDED_POINTER_SIZE (VARHDRSZ_EXTERNAL + sizeof(varatt_expanded))

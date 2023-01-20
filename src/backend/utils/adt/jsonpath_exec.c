@@ -49,7 +49,7 @@
  * we calculate operands first.  Then we check that results are numeric
  * singleton lists, calculate the result and pass it to the next path item.
  *
- * Copyright (c) 2019-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2019-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	src/backend/utils/adt/jsonpath_exec.c
@@ -959,9 +959,13 @@ executeItemOptUnwrapTarget(JsonPathExecContext *cxt, JsonPathItem *jsp,
 				JsonbValue *v;
 				bool		hasNext = jspGetNext(jsp, &elem);
 
-				if (!hasNext && !found)
+				if (!hasNext && !found && jsp->type != jpiVariable)
 				{
-					res = jperOk;	/* skip evaluation */
+					/*
+					 * Skip evaluation, but not for variables.  We must
+					 * trigger an error for the missing variable.
+					 */
+					res = jperOk;
 					break;
 				}
 
@@ -1721,7 +1725,8 @@ executeLikeRegex(JsonPathItem *jsp, JsonbValue *str, JsonbValue *rarg,
 		cxt->regex =
 			cstring_to_text_with_len(jsp->content.like_regex.pattern,
 									 jsp->content.like_regex.patternlen);
-		cxt->cflags = jspConvertRegexFlags(jsp->content.like_regex.flags);
+		(void) jspConvertRegexFlags(jsp->content.like_regex.flags,
+									&(cxt->cflags), NULL);
 	}
 
 	if (RE_compile_and_execute(cxt->regex, str->val.string.val,

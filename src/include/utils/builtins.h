@@ -4,7 +4,7 @@
  *	  Declarations for operations on built-in types.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/builtins.h
@@ -34,6 +34,8 @@ extern int	errdomainconstraint(Oid datatypeOid, const char *conname);
 /* encode.c */
 extern uint64 hex_encode(const char *src, size_t len, char *dst);
 extern uint64 hex_decode(const char *src, size_t len, char *dst);
+extern uint64 hex_decode_safe(const char *src, size_t len, char *dst,
+							  Node *escontext);
 
 /* int.c */
 extern int2vector *buildint2vector(const int16 *int2s, int n);
@@ -49,6 +51,10 @@ extern int32 pg_strtoint32(const char *s);
 extern int32 pg_strtoint32_safe(const char *s, Node *escontext);
 extern int64 pg_strtoint64(const char *s);
 extern int64 pg_strtoint64_safe(const char *s, Node *escontext);
+extern uint32 uint32in_subr(const char *s, char **endloc,
+							const char *typname, Node *escontext);
+extern uint64 uint64in_subr(const char *s, char **endloc,
+							const char *typname, Node *escontext);
 extern int	pg_itoa(int16 i, char *a);
 extern int	pg_ultoa_n(uint32 value, char *a);
 extern int	pg_ulltoa_n(uint64 value, char *a);

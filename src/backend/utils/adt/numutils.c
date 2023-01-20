@@ -3,7 +3,7 @@
  * numutils.c
  *	  utility functions for I/O of built-in numeric types.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -85,6 +85,17 @@ decimalLength64(const uint64 v)
 	return t + (v >= PowersOfTen[t]);
 }
 
+static const int8 hexlookup[128] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1, -1, -1, -1, -1,
+	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+};
+
 /*
  * Convert input string to a signed 16 bit integer.
  *
@@ -108,6 +119,7 @@ int16
 pg_strtoint16_safe(const char *s, Node *escontext)
 {
 	const char *ptr = s;
+	const char *firstdigit;
 	uint16		tmp = 0;
 	bool		neg = false;
 
@@ -124,18 +136,59 @@ pg_strtoint16_safe(const char *s, Node *escontext)
 	else if (*ptr == '+')
 		ptr++;
 
-	/* require at least one digit */
-	if (unlikely(!isdigit((unsigned char) *ptr)))
-		goto invalid_syntax;
-
 	/* process digits */
-	while (*ptr && isdigit((unsigned char) *ptr))
+	if (ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X'))
 	{
-		if (unlikely(tmp > -(PG_INT16_MIN / 10)))
-			goto out_of_range;
+		firstdigit = ptr += 2;
 
-		tmp = tmp * 10 + (*ptr++ - '0');
+		while (*ptr && isxdigit((unsigned char) *ptr))
+		{
+			if (unlikely(tmp > -(PG_INT16_MIN / 16)))
+				goto out_of_range;
+
+			tmp = tmp * 16 + hexlookup[(unsigned char) *ptr++];
+		}
 	}
+	else if (ptr[0] == '0' && (ptr[1] == 'o' || ptr[1] == 'O'))
+	{
+		firstdigit = ptr += 2;
+
+		while (*ptr && (*ptr >= '0' && *ptr <= '7'))
+		{
+			if (unlikely(tmp > -(PG_INT16_MIN / 8)))
+				goto out_of_range;
+
+			tmp = tmp * 8 + (*ptr++ - '0');
+		}
+	}
+	else if (ptr[0] == '0' && (ptr[1] == 'b' || ptr[1] == 'B'))
+	{
+		firstdigit = ptr += 2;
+
+		while (*ptr && (*ptr >= '0' && *ptr <= '1'))
+		{
+			if (unlikely(tmp > -(PG_INT16_MIN / 2)))
+				goto out_of_range;
+
+			tmp = tmp * 2 + (*ptr++ - '0');
+		}
+	}
+	else
+	{
+		firstdigit = ptr;
+
+		while (*ptr && isdigit((unsigned char) *ptr))
+		{
+			if (unlikely(tmp > -(PG_INT16_MIN / 10)))
+				goto out_of_range;
+
+			tmp = tmp * 10 + (*ptr++ - '0');
+		}
+	}
+
+	/* require at least one digit */
+	if (unlikely(ptr == firstdigit))
+		goto invalid_syntax;
 
 	/* allow trailing whitespace, but not other trailing chars */
 	while (*ptr != '\0' && isspace((unsigned char) *ptr))
@@ -193,6 +246,7 @@ int32
 pg_strtoint32_safe(const char *s, Node *escontext)
 {
 	const char *ptr = s;
+	const char *firstdigit;
 	uint32		tmp = 0;
 	bool		neg = false;
 
@@ -209,18 +263,59 @@ pg_strtoint32_safe(const char *s, Node *escontext)
 	else if (*ptr == '+')
 		ptr++;
 
-	/* require at least one digit */
-	if (unlikely(!isdigit((unsigned char) *ptr)))
-		goto invalid_syntax;
-
 	/* process digits */
-	while (*ptr && isdigit((unsigned char) *ptr))
+	if (ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X'))
 	{
-		if (unlikely(tmp > -(PG_INT32_MIN / 10)))
-			goto out_of_range;
+		firstdigit = ptr += 2;
 
-		tmp = tmp * 10 + (*ptr++ - '0');
+		while (*ptr && isxdigit((unsigned char) *ptr))
+		{
+			if (unlikely(tmp > -(PG_INT32_MIN / 16)))
+				goto out_of_range;
+
+			tmp = tmp * 16 + hexlookup[(unsigned char) *ptr++];
+		}
 	}
+	else if (ptr[0] == '0' && (ptr[1] == 'o' || ptr[1] == 'O'))
+	{
+		firstdigit = ptr += 2;
+
+		while (*ptr && (*ptr >= '0' && *ptr <= '7'))
+		{
+			if (unlikely(tmp > -(PG_INT32_MIN / 8)))
+				goto out_of_range;
+
+			tmp = tmp * 8 + (*ptr++ - '0');
+		}
+	}
+	else if (ptr[0] == '0' && (ptr[1] == 'b' || ptr[1] == 'B'))
+	{
+		firstdigit = ptr += 2;
+
+		while (*ptr && (*ptr >= '0' && *ptr <= '1'))
+		{
+			if (unlikely(tmp > -(PG_INT32_MIN / 2)))
+				goto out_of_range;
+
+			tmp = tmp * 2 + (*ptr++ - '0');
+		}
+	}
+	else
+	{
+		firstdigit = ptr;
+
+		while (*ptr && isdigit((unsigned char) *ptr))
+		{
+			if (unlikely(tmp > -(PG_INT32_MIN / 10)))
+				goto out_of_range;
+
+			tmp = tmp * 10 + (*ptr++ - '0');
+		}
+	}
+
+	/* require at least one digit */
+	if (unlikely(ptr == firstdigit))
+		goto invalid_syntax;
 
 	/* allow trailing whitespace, but not other trailing chars */
 	while (*ptr != '\0' && isspace((unsigned char) *ptr))
@@ -278,6 +373,7 @@ int64
 pg_strtoint64_safe(const char *s, Node *escontext)
 {
 	const char *ptr = s;
+	const char *firstdigit;
 	uint64		tmp = 0;
 	bool		neg = false;
 
@@ -294,18 +390,59 @@ pg_strtoint64_safe(const char *s, Node *escontext)
 	else if (*ptr == '+')
 		ptr++;
 
-	/* require at least one digit */
-	if (unlikely(!isdigit((unsigned char) *ptr)))
-		goto invalid_syntax;
-
 	/* process digits */
-	while (*ptr && isdigit((unsigned char) *ptr))
+	if (ptr[0] == '0' && (ptr[1] == 'x' || ptr[1] == 'X'))
 	{
-		if (unlikely(tmp > -(PG_INT64_MIN / 10)))
-			goto out_of_range;
+		firstdigit = ptr += 2;
 
-		tmp = tmp * 10 + (*ptr++ - '0');
+		while (*ptr && isxdigit((unsigned char) *ptr))
+		{
+			if (unlikely(tmp > -(PG_INT64_MIN / 16)))
+				goto out_of_range;
+
+			tmp = tmp * 16 + hexlookup[(unsigned char) *ptr++];
+		}
 	}
+	else if (ptr[0] == '0' && (ptr[1] == 'o' || ptr[1] == 'O'))
+	{
+		firstdigit = ptr += 2;
+
+		while (*ptr && (*ptr >= '0' && *ptr <= '7'))
+		{
+			if (unlikely(tmp > -(PG_INT64_MIN / 8)))
+				goto out_of_range;
+
+			tmp = tmp * 8 + (*ptr++ - '0');
+		}
+	}
+	else if (ptr[0] == '0' && (ptr[1] == 'b' || ptr[1] == 'B'))
+	{
+		firstdigit = ptr += 2;
+
+		while (*ptr && (*ptr >= '0' && *ptr <= '1'))
+		{
+			if (unlikely(tmp > -(PG_INT64_MIN / 2)))
+				goto out_of_range;
+
+			tmp = tmp * 2 + (*ptr++ - '0');
+		}
+	}
+	else
+	{
+		firstdigit = ptr;
+
+		while (*ptr && isdigit((unsigned char) *ptr))
+		{
+			if (unlikely(tmp > -(PG_INT64_MIN / 10)))
+				goto out_of_range;
+
+			tmp = tmp * 10 + (*ptr++ - '0');
+		}
+	}
+
+	/* require at least one digit */
+	if (unlikely(ptr == firstdigit))
+		goto invalid_syntax;
 
 	/* allow trailing whitespace, but not other trailing chars */
 	while (*ptr != '\0' && isspace((unsigned char) *ptr))
@@ -338,6 +475,156 @@ invalid_syntax:
 			(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 			 errmsg("invalid input syntax for type %s: \"%s\"",
 					"bigint", s)));
+}
+
+/*
+ * Convert input string to an unsigned 32 bit integer.
+ *
+ * Allows any number of leading or trailing whitespace characters.
+ *
+ * If endloc isn't NULL, store a pointer to the rest of the string there,
+ * so that caller can parse the rest.  Otherwise, it's an error if anything
+ * but whitespace follows.
+ *
+ * typname is what is reported in error messges.
+ *
+ * If escontext points to an ErrorSaveContext node, that is filled instead
+ * of throwing an error; the caller must check SOFT_ERROR_OCCURRED()
+ * to detect errors.
+ */
+uint32
+uint32in_subr(const char *s, char **endloc,
+			  const char *typname, Node *escontext)
+{
+	uint32		result;
+	unsigned long cvt;
+	char	   *endptr;
+
+	errno = 0;
+	cvt = strtoul(s, &endptr, 0);
+
+	/*
+	 * strtoul() normally only sets ERANGE.  On some systems it may also set
+	 * EINVAL, which simply means it couldn't parse the input string.  Be sure
+	 * to report that the same way as the standard error indication (that
+	 * endptr == s).
+	 */
+	if ((errno && errno != ERANGE) || endptr == s)
+		ereturn(escontext, 0,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid input syntax for type %s: \"%s\"",
+						typname, s)));
+
+	if (errno == ERANGE)
+		ereturn(escontext, 0,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value \"%s\" is out of range for type %s",
+						s, typname)));
+
+	if (endloc)
+	{
+		/* caller wants to deal with rest of string */
+		*endloc = endptr;
+	}
+	else
+	{
+		/* allow only whitespace after number */
+		while (*endptr && isspace((unsigned char) *endptr))
+			endptr++;
+		if (*endptr)
+			ereturn(escontext, 0,
+					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+					 errmsg("invalid input syntax for type %s: \"%s\"",
+							typname, s)));
+	}
+
+	result = (uint32) cvt;
+
+	/*
+	 * Cope with possibility that unsigned long is wider than uint32, in which
+	 * case strtoul will not raise an error for some values that are out of
+	 * the range of uint32.
+	 *
+	 * For backwards compatibility, we want to accept inputs that are given
+	 * with a minus sign, so allow the input value if it matches after either
+	 * signed or unsigned extension to long.
+	 *
+	 * To ensure consistent results on 32-bit and 64-bit platforms, make sure
+	 * the error message is the same as if strtoul() had returned ERANGE.
+	 */
+#if PG_UINT32_MAX != ULONG_MAX
+	if (cvt != (unsigned long) result &&
+		cvt != (unsigned long) ((int) result))
+		ereturn(escontext, 0,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value \"%s\" is out of range for type %s",
+						s, typname)));
+#endif
+
+	return result;
+}
+
+/*
+ * Convert input string to an unsigned 64 bit integer.
+ *
+ * Allows any number of leading or trailing whitespace characters.
+ *
+ * If endloc isn't NULL, store a pointer to the rest of the string there,
+ * so that caller can parse the rest.  Otherwise, it's an error if anything
+ * but whitespace follows.
+ *
+ * typname is what is reported in error messges.
+ *
+ * If escontext points to an ErrorSaveContext node, that is filled instead
+ * of throwing an error; the caller must check SOFT_ERROR_OCCURRED()
+ * to detect errors.
+ */
+uint64
+uint64in_subr(const char *s, char **endloc,
+			  const char *typname, Node *escontext)
+{
+	uint64		result;
+	char	   *endptr;
+
+	errno = 0;
+	result = strtou64(s, &endptr, 0);
+
+	/*
+	 * strtoul[l] normally only sets ERANGE.  On some systems it may also set
+	 * EINVAL, which simply means it couldn't parse the input string.  Be sure
+	 * to report that the same way as the standard error indication (that
+	 * endptr == s).
+	 */
+	if ((errno && errno != ERANGE) || endptr == s)
+		ereturn(escontext, 0,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				 errmsg("invalid input syntax for type %s: \"%s\"",
+						typname, s)));
+
+	if (errno == ERANGE)
+		ereturn(escontext, 0,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value \"%s\" is out of range for type %s",
+						s, typname)));
+
+	if (endloc)
+	{
+		/* caller wants to deal with rest of string */
+		*endloc = endptr;
+	}
+	else
+	{
+		/* allow only whitespace after number */
+		while (*endptr && isspace((unsigned char) *endptr))
+			endptr++;
+		if (*endptr)
+			ereturn(escontext, 0,
+					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+					 errmsg("invalid input syntax for type %s: \"%s\"",
+							typname, s)));
+	}
+
+	return result;
 }
 
 /*

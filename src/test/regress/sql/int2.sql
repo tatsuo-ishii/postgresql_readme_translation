@@ -23,6 +23,11 @@ SELECT pg_input_is_valid('asdf', 'int2');
 SELECT pg_input_is_valid('50000', 'int2');
 SELECT pg_input_error_message('50000', 'int2');
 
+-- While we're here, check int2vector as well
+SELECT pg_input_is_valid(' 1 3  5 ', 'int2vector');
+SELECT pg_input_error_message('1 asdf', 'int2vector');
+SELECT pg_input_error_message('50000', 'int2vector');
+
 SELECT * FROM INT2_TBL AS f(a, b);
 
 SELECT * FROM (TABLE int2_tbl) AS s (a, b);
@@ -110,3 +115,29 @@ FROM (VALUES (-2.5::numeric),
              (0.5::numeric),
              (1.5::numeric),
              (2.5::numeric)) t(x);
+
+
+-- non-decimal literals
+
+SELECT int2 '0b100101';
+SELECT int2 '0o273';
+SELECT int2 '0x42F';
+
+SELECT int2 '0b';
+SELECT int2 '0o';
+SELECT int2 '0x';
+
+-- cases near overflow
+SELECT int2 '0b111111111111111';
+SELECT int2 '0b1000000000000000';
+SELECT int2 '0o77777';
+SELECT int2 '0o100000';
+SELECT int2 '0x7FFF';
+SELECT int2 '0x8000';
+
+SELECT int2 '-0b1000000000000000';
+SELECT int2 '-0b1000000000000001';
+SELECT int2 '-0o100000';
+SELECT int2 '-0o100001';
+SELECT int2 '-0x8000';
+SELECT int2 '-0x8001';

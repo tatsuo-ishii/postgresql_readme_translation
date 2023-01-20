@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 ecpg_compat_sources = files(
   'informix.c',
 )

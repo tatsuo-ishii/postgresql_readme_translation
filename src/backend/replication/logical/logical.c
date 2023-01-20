@@ -2,7 +2,7 @@
  * logical.c
  *	   PostgreSQL logical decoding coordination
  *
- * Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/logical/logical.c
@@ -555,8 +555,10 @@ CreateDecodingContext(XLogRecPtr start_lsn,
 	/* Mark slot to allow two_phase decoding if not already marked */
 	if (ctx->twophase && !slot->data.two_phase)
 	{
+		SpinLockAcquire(&slot->mutex);
 		slot->data.two_phase = true;
 		slot->data.two_phase_at = start_lsn;
+		SpinLockRelease(&slot->mutex);
 		ReplicationSlotMarkDirty();
 		ReplicationSlotSave();
 		SnapBuildSetTwoPhaseAt(ctx->snapshot_builder, start_lsn);

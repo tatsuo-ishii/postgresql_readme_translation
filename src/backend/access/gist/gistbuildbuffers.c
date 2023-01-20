@@ -4,7 +4,7 @@
  *	  node buffer management functions for GiST buffering build algorithm.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -38,7 +38,7 @@ static long gistBuffersGetFreeBlock(GISTBuildBuffers *gfbb);
 static void gistBuffersReleaseBlock(GISTBuildBuffers *gfbb, long blocknum);
 
 static void ReadTempFileBlock(BufFile *file, long blknum, void *ptr);
-static void WriteTempFileBlock(BufFile *file, long blknum, void *ptr);
+static void WriteTempFileBlock(BufFile *file, long blknum, const void *ptr);
 
 
 /*
@@ -753,18 +753,13 @@ gistRelocateBuildBuffersOnSplit(GISTBuildBuffers *gfbb, GISTSTATE *giststate,
 static void
 ReadTempFileBlock(BufFile *file, long blknum, void *ptr)
 {
-	size_t		nread;
-
 	if (BufFileSeekBlock(file, blknum) != 0)
 		elog(ERROR, "could not seek to block %ld in temporary file", blknum);
-	nread = BufFileRead(file, ptr, BLCKSZ);
-	if (nread != BLCKSZ)
-		elog(ERROR, "could not read temporary file: read only %zu of %zu bytes",
-			 nread, (size_t) BLCKSZ);
+	BufFileReadExact(file, ptr, BLCKSZ);
 }
 
 static void
-WriteTempFileBlock(BufFile *file, long blknum, void *ptr)
+WriteTempFileBlock(BufFile *file, long blknum, const void *ptr)
 {
 	if (BufFileSeekBlock(file, blknum) != 0)
 		elog(ERROR, "could not seek to block %ld in temporary file", blknum);

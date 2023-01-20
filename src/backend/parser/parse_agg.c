@@ -3,7 +3,7 @@
  * parse_agg.c
  *	  handle aggregates and window functions in parser
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1025,6 +1025,10 @@ transformWindowFuncCall(ParseState *pstate, WindowFunc *wfunc,
 				 /* matched, no refname */ ;
 			else
 				continue;
+
+			/*
+			 * Also see similar de-duplication code in optimize_window_clauses
+			 */
 			if (equal(refwin->partitionClause, windef->partitionClause) &&
 				equal(refwin->orderClause, windef->orderClause) &&
 				refwin->frameOptions == windef->frameOptions &&

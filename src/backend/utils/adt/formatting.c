@@ -4,7 +4,7 @@
  * src/backend/utils/adt/formatting.c
  *
  *
- *	 Portions Copyright (c) 1999-2022, PostgreSQL Global Development Group
+ *	 Portions Copyright (c) 1999-2023, PostgreSQL Global Development Group
  *
  *
  *	 TO_CHAR(); TO_TIMESTAMP(); TO_DATE(); TO_NUMBER();
@@ -88,6 +88,7 @@
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/pg_locale.h"
+#include "varatt.h"
 
 
 /* ----------
@@ -5663,13 +5664,9 @@ NUM_processor(FormatNode *node, NUMDesc *Num, char *inout,
 		{
 			if (Np->sign != '-')
 			{
-				if (IS_BRACKET(Np->Num) && IS_FILLMODE(Np->Num))
+				if (IS_FILLMODE(Np->Num))
 					Np->Num->flag &= ~NUM_F_BRACKET;
-				if (IS_MINUS(Np->Num))
-					Np->Num->flag &= ~NUM_F_MINUS;
 			}
-			else if (Np->sign != '+' && IS_PLUS(Np->Num))
-				Np->Num->flag &= ~NUM_F_PLUS;
 
 			if (Np->sign == '+' && IS_FILLMODE(Np->Num) && IS_LSIGN(Np->Num) == false)
 				Np->sign_wrote = true;	/* needn't sign */

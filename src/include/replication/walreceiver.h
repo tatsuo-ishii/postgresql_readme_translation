@@ -3,7 +3,7 @@
  * walreceiver.h
  *	  Exports from replication/walreceiverfuncs.c.
  *
- * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2023, PostgreSQL Global Development Group
  *
  * src/include/replication/walreceiver.h
  *
@@ -182,7 +182,7 @@ typedef struct
 			uint32		proto_version;	/* Logical protocol version */
 			List	   *publication_names;	/* String list of publications */
 			bool		binary; /* Ask publisher to use binary */
-			bool		streaming;	/* Streaming of large transactions */
+			char	   *streaming_str;	/* Streaming of large transactions */
 			bool		twophase;	/* Streaming of two-phase transactions at
 									 * prepare time */
 			char	   *origin; /* Only publish data originating from the

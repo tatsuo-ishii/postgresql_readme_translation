@@ -2,7 +2,7 @@
  * backend_status.h
  *	  Definitions related to backend status reporting
  *
- * Copyright (c) 2001-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2001-2023, PostgreSQL Global Development Group
  *
  * src/include/utils/backend_status.h
  * ----------
@@ -266,6 +266,17 @@ typedef struct LocalPgBackendStatus
 	 * not.
 	 */
 	TransactionId backend_xmin;
+
+	/*
+	 * Number of cached subtransactions in the current session.
+	 */
+	int	backend_subxact_count;
+
+	/*
+	 * The number of subtransactions in the current session which exceeded the
+	 * cached subtransaction limit.
+	 */
+	bool backend_subxact_overflowed;
 } LocalPgBackendStatus;
 
 

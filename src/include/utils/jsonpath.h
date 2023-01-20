@@ -3,7 +3,7 @@
  * jsonpath.h
  *	Definitions for jsonpath datatype
  *
- * Copyright (c) 2019-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2019-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	src/include/utils/jsonpath.h
@@ -254,8 +254,11 @@ typedef struct JsonPathParseResult
 	bool		lax;
 } JsonPathParseResult;
 
-extern JsonPathParseResult *parsejsonpath(const char *str, int len);
+extern JsonPathParseResult *parsejsonpath(const char *str, int len,
+										  struct Node *escontext);
 
-extern int	jspConvertRegexFlags(uint32 xflags);
+extern bool jspConvertRegexFlags(uint32 xflags, int *result,
+								 struct Node *escontext);
+
 
 #endif

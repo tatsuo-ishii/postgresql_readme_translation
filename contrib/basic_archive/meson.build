@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 basic_archive_sources = files(
   'basic_archive.c',
 )

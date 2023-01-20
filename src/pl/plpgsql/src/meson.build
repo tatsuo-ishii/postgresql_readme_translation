@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 plpgsql_sources = files(
   'pl_comp.c',
   'pl_exec.c',

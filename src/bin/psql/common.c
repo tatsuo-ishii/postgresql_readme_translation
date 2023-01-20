@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2023, PostgreSQL Global Development Group
  *
  * src/bin/psql/common.c
  */
@@ -1447,7 +1447,7 @@ ExecQueryAndProcessResults(const char *query,
 		if (!AcceptResult(result, false))
 		{
 			/*
-			 * Some error occured, either a server-side failure or a failure
+			 * Some error occurred, either a server-side failure or a failure
 			 * to submit the command string.  Record that.
 			 */
 			const char *error = PQresultErrorMessage(result);

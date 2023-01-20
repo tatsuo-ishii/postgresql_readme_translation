@@ -26,7 +26,7 @@
  *	before ExecutorEnd.  This can be omitted only in case of EXPLAIN,
  *	which should also omit ExecutorRun.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1225,6 +1225,7 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 
 	/* The following fields are set later if needed */
 	resultRelInfo->ri_RowIdAttNo = 0;
+	resultRelInfo->ri_extraUpdatedCols = NULL;
 	resultRelInfo->ri_projectNew = NULL;
 	resultRelInfo->ri_newTupleSlot = NULL;
 	resultRelInfo->ri_oldTupleSlot = NULL;

@@ -3,7 +3,7 @@
  * explain.c
  *	  Explain query execution plans
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  * IDENTIFICATION
@@ -3324,7 +3324,7 @@ show_hashagg_info(AggState *aggstate, ExplainState *es)
 			if (!gotone)
 				ExplainIndentText(es);
 			else
-				appendStringInfoString(es->str, "  ");
+				appendStringInfoSpaces(es->str, 2);
 
 			appendStringInfo(es->str, "Batches: %d  Memory Usage: " INT64_FORMAT "kB",
 							 aggstate->hash_batches_used, memPeakKb);

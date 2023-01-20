@@ -4,7 +4,7 @@
  *	  POSTGRES error reporting/logging definitions.
  *
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/elog.h
@@ -89,7 +89,7 @@ struct Node;
  */
 #if defined(errno) && defined(__linux__)
 #define pg_prevent_errno_in_scope() int __errno_location pg_attribute_unused()
-#elif defined(errno) && (defined(__darwin__) || defined(__freebsd__))
+#elif defined(errno) && (defined(__darwin__) || defined(__FreeBSD__))
 #define pg_prevent_errno_in_scope() int __error pg_attribute_unused()
 #else
 #define pg_prevent_errno_in_scope()

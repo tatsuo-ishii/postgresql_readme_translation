@@ -3,7 +3,7 @@
  * fd.c
  *	  Virtual file descriptor code.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -638,7 +638,7 @@ pg_truncate(const char *path, off_t length)
 	fd = OpenTransientFile(path, O_RDWR | PG_BINARY);
 	if (fd >= 0)
 	{
-		ret = ftruncate(fd, 0);
+		ret = ftruncate(fd, length);
 		save_errno = errno;
 		CloseTransientFile(fd);
 		errno = save_errno;

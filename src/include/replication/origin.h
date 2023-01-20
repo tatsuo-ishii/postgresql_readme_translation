@@ -2,7 +2,7 @@
  * origin.h
  *	   Exports from replication/logical/origin.c
  *
- * Copyright (c) 2013-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2013-2023, PostgreSQL Global Development Group
  *
  * src/include/replication/origin.h
  *-------------------------------------------------------------------------
@@ -53,7 +53,7 @@ extern XLogRecPtr replorigin_get_progress(RepOriginId node, bool flush);
 
 extern void replorigin_session_advance(XLogRecPtr remote_commit,
 									   XLogRecPtr local_commit);
-extern void replorigin_session_setup(RepOriginId node);
+extern void replorigin_session_setup(RepOriginId node, int acquired_by);
 extern void replorigin_session_reset(void);
 extern XLogRecPtr replorigin_session_get_progress(bool flush);
 

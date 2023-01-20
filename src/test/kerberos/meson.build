@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 tests += {
   'name': 'kerberos',
   'sd': meson.current_source_dir(),

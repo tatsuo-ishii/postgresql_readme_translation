@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 tests += {
   'name': 'ldap',
   'sd': meson.current_source_dir(),
@@ -8,7 +10,6 @@ tests += {
     ],
     'env': {
       'with_ldap': ldap.found() ? 'yes' : 'no',
-      'OPENSSL': openssl.path(),
     },
   },
 }

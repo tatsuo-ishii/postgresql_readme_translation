@@ -3,7 +3,7 @@
  * rewriteHandler.c
  *		Primary module of query rewriter.
  *
- * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2023, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -1634,46 +1634,6 @@ rewriteValuesRTEToNulls(Query *parsetree, RangeTblEntry *rte)
 
 
 /*
- * Record in target_rte->extraUpdatedCols the indexes of any generated columns
- * columns that depend on any columns mentioned in
- * target_perminfo->updatedCols.
- */
-void
-fill_extraUpdatedCols(RangeTblEntry *target_rte,
-					  RTEPermissionInfo *target_perminfo,
-					  Relation target_relation)
-{
-	TupleDesc	tupdesc = RelationGetDescr(target_relation);
-	TupleConstr *constr = tupdesc->constr;
-
-	target_rte->extraUpdatedCols = NULL;
-
-	if (constr && constr->has_generated_stored)
-	{
-		for (int i = 0; i < constr->num_defval; i++)
-		{
-			AttrDefault *defval = &constr->defval[i];
-			Node	   *expr;
-			Bitmapset  *attrs_used = NULL;
-
-			/* skip if not generated column */
-			if (!TupleDescAttr(tupdesc, defval->adnum - 1)->attgenerated)
-				continue;
-
-			/* identify columns this generated column depends on */
-			expr = stringToNode(defval->adbin);
-			pull_varattnos(expr, 1, &attrs_used);
-
-			if (bms_overlap(target_perminfo->updatedCols, attrs_used))
-				target_rte->extraUpdatedCols =
-					bms_add_member(target_rte->extraUpdatedCols,
-								   defval->adnum - FirstLowInvalidHeapAttributeNumber);
-		}
-	}
-}
-
-
-/*
  * matchLocks -
  *	  match the list of locks and returns the matching rules
  */
@@ -1755,10 +1715,7 @@ ApplyRetrieveRule(Query *parsetree,
 				  List *activeRIRs)
 {
 	Query	   *rule_action;
-	RangeTblEntry *rte,
-			   *subrte;
-	RTEPermissionInfo *perminfo,
-			   *sub_perminfo;
+	RangeTblEntry *rte;
 	RowMarkClause *rc;
 
 	if (list_length(rule->actions) != 1)
@@ -1870,32 +1827,20 @@ ApplyRetrieveRule(Query *parsetree,
 	 * original RTE to a subquery RTE.
 	 */
 	rte = rt_fetch(rt_index, parsetree->rtable);
-	perminfo = getRTEPermissionInfo(parsetree->rteperminfos, rte);
 
 	rte->rtekind = RTE_SUBQUERY;
 	rte->subquery = rule_action;
 	rte->security_barrier = RelationIsSecurityView(relation);
-	/* Clear fields that should not be set in a subquery RTE */
-	rte->relid = InvalidOid;
-	rte->relkind = 0;
-	rte->rellockmode = 0;
-	rte->tablesample = NULL;
-	rte->perminfoindex = 0;		/* no permission checking for this RTE */
-	rte->inh = false;			/* must not be set for a subquery */
 
 	/*
-	 * We move the view's permission check data down to its RTEPermissionInfo
-	 * contained in the view query, which the OLD entry in its range table
-	 * points to.
+	 * Clear fields that should not be set in a subquery RTE.  Note that we
+	 * leave the relid, rellockmode, and perminfoindex fields set, so that the
+	 * view relation can be appropriately locked before execution and its
+	 * permissions checked.
 	 */
-	subrte = rt_fetch(PRS2_OLD_VARNO, rule_action->rtable);
-	Assert(subrte->relid == relation->rd_id);
-	sub_perminfo = getRTEPermissionInfo(rule_action->rteperminfos, subrte);
-	sub_perminfo->requiredPerms = perminfo->requiredPerms;
-	sub_perminfo->checkAsUser = perminfo->checkAsUser;
-	sub_perminfo->selectedCols = perminfo->selectedCols;
-	sub_perminfo->insertedCols = perminfo->insertedCols;
-	sub_perminfo->updatedCols = perminfo->updatedCols;
+	rte->relkind = 0;
+	rte->tablesample = NULL;
+	rte->inh = false;			/* must not be set for a subquery */
 
 	return parsetree;
 }
@@ -1907,9 +1852,10 @@ ApplyRetrieveRule(Query *parsetree,
  * aggregate.  We leave it to the planner to detect that.
  *
  * NB: this must agree with the parser's transformLockingClause() routine.
- * However, unlike the parser we have to be careful not to mark a view's
- * OLD and NEW rels for updating.  The best way to handle that seems to be
- * to scan the jointree to determine which rels are used.
+ * However, we used to have to avoid marking a view's OLD and NEW rels for
+ * updating, which motivated scanning the jointree to determine which rels
+ * are used.  Possibly that could now be simplified into just scanning the
+ * rangetable as the parser does.
  */
 static void
 markQueryForLocking(Query *qry, Node *jtnode,
@@ -3738,7 +3684,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length)
 	{
 		int			result_relation;
 		RangeTblEntry *rt_entry;
-		RTEPermissionInfo *rt_perminfo;
 		Relation	rt_entry_relation;
 		List	   *locks;
 		int			product_orig_rt_length;
@@ -3751,7 +3696,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length)
 		Assert(result_relation != 0);
 		rt_entry = rt_fetch(result_relation, parsetree->rtable);
 		Assert(rt_entry->rtekind == RTE_RELATION);
-		rt_perminfo = getRTEPermissionInfo(parsetree->rteperminfos, rt_entry);
 
 		/*
 		 * We can use NoLock here since either the parser or
@@ -3843,9 +3787,6 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length)
 									parsetree->override,
 									rt_entry_relation,
 									NULL, 0, NULL);
-
-			/* Also populate extraUpdatedCols (for generated columns) */
-			fill_extraUpdatedCols(rt_entry, rt_perminfo, rt_entry_relation);
 		}
 		else if (event == CMD_MERGE)
 		{

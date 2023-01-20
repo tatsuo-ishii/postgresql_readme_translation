@@ -4,7 +4,7 @@
  *	  Utility and convenience functions for fmgr functions that return
  *	  sets and/or composite types, or deal with VARIADIC inputs.
  *
- * Copyright (c) 2002-2022, PostgreSQL Global Development Group
+ * Copyright (c) 2002-2023, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/utils/fmgr/funcapi.c
@@ -1876,7 +1876,7 @@ RelationNameGetTupleDesc(const char *relname)
 	List	   *relname_list;
 
 	/* Open relation and copy the tuple description */
-	relname_list = stringToQualifiedNameList(relname);
+	relname_list = stringToQualifiedNameList(relname, NULL);
 	relvar = makeRangeVarFromNameList(relname_list);
 	rel = relation_openrv(relvar, AccessShareLock);
 	tupdesc = CreateTupleDescCopy(RelationGetDescr(rel));
