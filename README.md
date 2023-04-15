@@ -7,7 +7,7 @@ Currently only Japanese translation is available in README_master_ja branch.
 
 - Currently available translation files are:
   - src/backend/executor/README
-  - src/backend/optimizer/README
+  - src/backend/optimizer/README (last update: Apr 15, 2023)
 
 ## What translations are available besides the README?
 
