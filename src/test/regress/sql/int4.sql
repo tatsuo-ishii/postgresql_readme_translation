@@ -21,7 +21,7 @@ SELECT * FROM INT4_TBL;
 SELECT pg_input_is_valid('34', 'int4');
 SELECT pg_input_is_valid('asdf', 'int4');
 SELECT pg_input_is_valid('1000000000000', 'int4');
-SELECT pg_input_error_message('1000000000000', 'int4');
+SELECT * FROM pg_input_error_info('1000000000000', 'int4');
 
 SELECT i.* FROM INT4_TBL i WHERE i.f1 <> int2 '0';
 
@@ -196,3 +196,17 @@ SELECT int4 '-0o20000000000';
 SELECT int4 '-0o20000000001';
 SELECT int4 '-0x80000000';
 SELECT int4 '-0x80000001';
+
+
+-- underscores
+
+SELECT int4 '1_000_000';
+SELECT int4 '1_2_3';
+SELECT int4 '0x1EEE_FFFF';
+SELECT int4 '0o2_73';
+SELECT int4 '0b_10_0101';
+
+-- error cases
+SELECT int4 '_100';
+SELECT int4 '100_';
+SELECT int4 '100__000';

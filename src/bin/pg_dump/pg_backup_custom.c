@@ -99,7 +99,7 @@ static size_t _CustomReadFunc(ArchiveHandle *AH, char **buf, size_t *buflen);
  *	It's task is to create any extra archive context (using AH->formatData),
  *	and to initialize the supported function pointers.
  *
- *	It should also prepare whatever it's input source is for reading/writing,
+ *	It should also prepare whatever its input source is for reading/writing,
  *	and in the case of a read mode connection, it should load the Header & TOC.
  */
 void
@@ -298,7 +298,9 @@ _StartData(ArchiveHandle *AH, TocEntry *te)
 	_WriteByte(AH, BLK_DATA);	/* Block type */
 	WriteInt(AH, te->dumpId);	/* For sanity check */
 
-	ctx->cs = AllocateCompressor(AH->compression_spec, _CustomWriteFunc);
+	ctx->cs = AllocateCompressor(AH->compression_spec,
+								 NULL,
+								 _CustomWriteFunc);
 }
 
 /*
@@ -317,15 +319,15 @@ _WriteData(ArchiveHandle *AH, const void *data, size_t dLen)
 	CompressorState *cs = ctx->cs;
 
 	if (dLen > 0)
-		/* WriteDataToArchive() internally throws write errors */
-		WriteDataToArchive(AH, cs, data, dLen);
+		/* writeData() internally throws write errors */
+		cs->writeData(AH, cs, data, dLen);
 }
 
 /*
  * Called by the archiver when a dumper's 'DataDumper' routine has
  * finished.
  *
- * Optional.
+ * Mandatory.
  */
 static void
 _EndData(ArchiveHandle *AH, TocEntry *te)
@@ -333,6 +335,8 @@ _EndData(ArchiveHandle *AH, TocEntry *te)
 	lclContext *ctx = (lclContext *) AH->formatData;
 
 	EndCompressor(AH, ctx->cs);
+	ctx->cs = NULL;
+
 	/* Send the end marker */
 	WriteInt(AH, 0);
 }
@@ -377,7 +381,9 @@ _StartLO(ArchiveHandle *AH, TocEntry *te, Oid oid)
 
 	WriteInt(AH, oid);
 
-	ctx->cs = AllocateCompressor(AH->compression_spec, _CustomWriteFunc);
+	ctx->cs = AllocateCompressor(AH->compression_spec,
+								 NULL,
+								 _CustomWriteFunc);
 }
 
 /*
@@ -566,7 +572,12 @@ _PrintTocData(ArchiveHandle *AH, TocEntry *te)
 static void
 _PrintData(ArchiveHandle *AH)
 {
-	ReadDataFromArchive(AH, AH->compression_spec, _CustomReadFunc);
+	CompressorState *cs;
+
+	cs = AllocateCompressor(AH->compression_spec,
+							_CustomReadFunc, NULL);
+	cs->readData(AH, cs);
+	EndCompressor(AH, cs);
 }
 
 static void
@@ -977,7 +988,7 @@ _readBlockHeader(ArchiveHandle *AH, int *type, int *id)
 }
 
 /*
- * Callback function for WriteDataToArchive. Writes one block of (compressed)
+ * Callback function for writeData. Writes one block of (compressed)
  * data to the archive.
  */
 static void
@@ -992,7 +1003,7 @@ _CustomWriteFunc(ArchiveHandle *AH, const char *buf, size_t len)
 }
 
 /*
- * Callback function for ReadDataFromArchive. To keep things simple, we
+ * Callback function for readData. To keep things simple, we
  * always read one compressed block at a time.
  */
 static size_t

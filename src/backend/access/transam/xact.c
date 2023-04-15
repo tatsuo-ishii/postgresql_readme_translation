@@ -1374,12 +1374,6 @@ RecordTransactionCommit(void)
 					  replorigin_session_origin != DoNotReplicateId);
 
 		/*
-		 * Begin commit critical section and insert the commit XLOG record.
-		 */
-		/* Tell bufmgr and smgr to prepare for commit */
-		BufmgrCommit();
-
-		/*
 		 * Mark ourselves as within our "commit critical section".  This
 		 * forces any concurrent checkpoint to wait until we've updated
 		 * pg_xact.  Without this, it is possible for the checkpoint to set
@@ -1400,6 +1394,9 @@ RecordTransactionCommit(void)
 		START_CRIT_SECTION();
 		MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
+		/*
+		 * Insert the commit XLOG record.
+		 */
 		XactLogCommitRecord(GetCurrentTransactionStopTimestamp(),
 							nchildren, children, nrels, rels,
 							ndroppedstats, droppedstats,
@@ -2536,9 +2533,6 @@ PrepareTransaction(void)
 
 	prepared_at = GetCurrentTimestamp();
 
-	/* Tell bufmgr and smgr to prepare for commit */
-	BufmgrCommit();
-
 	/*
 	 * Reserve the GID for this transaction. This could fail if the requested
 	 * GID is invalid or already in use.
@@ -2725,8 +2719,7 @@ AbortTransaction(void)
 	pgstat_report_wait_end();
 	pgstat_progress_end_command();
 
-	/* Clean up buffer I/O and buffer context locks, too */
-	AbortBufferIO();
+	/* Clean up buffer context locks, too */
 	UnlockBuffers();
 
 	/* Reset WAL record construction state */
@@ -2755,7 +2748,7 @@ AbortTransaction(void)
 	 * handler.  We do this fairly early in the sequence so that the timeout
 	 * infrastructure will be functional if needed while aborting.
 	 */
-	PG_SETMASK(&UnBlockSig);
+	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
 
 	/*
 	 * check the current transaction state
@@ -5086,7 +5079,6 @@ AbortSubTransaction(void)
 
 	pgstat_report_wait_end();
 	pgstat_progress_end_command();
-	AbortBufferIO();
 	UnlockBuffers();
 
 	/* Reset WAL record construction state */
@@ -5115,7 +5107,7 @@ AbortSubTransaction(void)
 	 * handler.  We do this fairly early in the sequence so that the timeout
 	 * infrastructure will be functional if needed while aborting.
 	 */
-	PG_SETMASK(&UnBlockSig);
+	sigprocmask(SIG_SETMASK, &UnBlockSig, NULL);
 
 	/*
 	 * check the current transaction state

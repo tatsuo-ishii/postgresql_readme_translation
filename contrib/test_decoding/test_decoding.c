@@ -127,8 +127,6 @@ _PG_init(void)
 void
 _PG_output_plugin_init(OutputPluginCallbacks *cb)
 {
-	AssertVariableIsOfType(&_PG_output_plugin_init, LogicalOutputPluginInit);
-
 	cb->startup_cb = pg_decode_startup;
 	cb->begin_cb = pg_decode_begin_txn;
 	cb->change_cb = pg_decode_change;
@@ -817,11 +815,11 @@ pg_decode_stream_abort(LogicalDecodingContext *ctx,
 	 * maintain the output_plugin_private only under the toptxn so if this is
 	 * not the toptxn then fetch the toptxn.
 	 */
-	ReorderBufferTXN *toptxn = txn->toptxn ? txn->toptxn : txn;
+	ReorderBufferTXN *toptxn = rbtxn_get_toptxn(txn);
 	TestDecodingTxnData *txndata = toptxn->output_plugin_private;
 	bool		xact_wrote_changes = txndata->xact_wrote_changes;
 
-	if (txn->toptxn == NULL)
+	if (rbtxn_is_toptxn(txn))
 	{
 		Assert(txn->output_plugin_private != NULL);
 		pfree(txndata);

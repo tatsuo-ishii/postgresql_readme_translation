@@ -67,6 +67,9 @@ option('extra_version', type : 'string', value: '',
 option('darwin_sysroot', type : 'string', value: '',
   description: 'select a non-default sysroot path')
 
+option('rpath', type : 'boolean', value: true,
+  description: 'whether to embed shared library search path in executables')
+
 
 # External dependencies
 
@@ -75,6 +78,15 @@ option('bonjour', type : 'feature', value: 'auto',
 
 option('bsd_auth', type : 'feature', value: 'auto',
   description: 'build with BSD Authentication support')
+
+option('docs', type : 'feature', value: 'auto',
+  description: 'documentation in HTML and man page format')
+
+option('docs_pdf', type : 'feature', value: 'auto',
+  description: 'documentation in PDF format')
+
+option('docs_html_style', type : 'combo', choices: ['simple', 'website'],
+  description: 'CSS stylesheet for HTML documentation')
 
 option('dtrace', type : 'feature', value: 'disabled',
   description: 'DTrace support')
@@ -127,8 +139,8 @@ option('readline', type : 'feature', value : 'auto',
 option('selinux', type : 'feature', value : 'disabled',
   description: 'build with SELinux support')
 
-option('ssl', type : 'combo', choices : ['none', 'openssl'],
-  value : 'none',
+option('ssl', type : 'combo', choices : ['auto', 'none', 'openssl'],
+  value : 'auto',
   description: 'use LIB for SSL/TLS support (openssl)')
 
 option('systemd', type : 'feature', value: 'auto',
@@ -155,6 +167,9 @@ option('DTRACE', type : 'string', value: 'dtrace',
 
 option('FLEX', type : 'array', value: ['flex', 'win_flex'],
   description: 'path to flex binary')
+
+option('FOP', type : 'string', value: 'fop',
+  description: 'path to fop binary')
 
 option('GZIP', type : 'string', value: 'gzip',
   description: 'path to gzip binary')

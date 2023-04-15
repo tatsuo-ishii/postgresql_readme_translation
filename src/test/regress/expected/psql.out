@@ -4536,7 +4536,7 @@ invalid command \lo
 	\timing arg1
 	\unset arg1
 	\w arg1
-	\watch arg1
+	\watch arg1 arg2
 	\x arg1
 	-- \else here is eaten as part of OT_FILEPIPE argument
 	\w |/no/such/file \else
@@ -5247,6 +5247,35 @@ reset work_mem;
  pg_catalog | &&   | anyarray      | anyarray       | boolean     | overlaps
 (1 row)
 
+-- check \df+
+-- we have to use functions with a predictable owner name, so make a role
+create role regress_psql_user superuser;
+begin;
+set session authorization regress_psql_user;
+create function psql_df_internal (float8)
+  returns float8
+  language internal immutable parallel safe strict
+  as 'dsin';
+create function psql_df_sql (x integer)
+  returns integer
+  security definer
+  begin atomic select x + 1; end;
+create function psql_df_plpgsql ()
+  returns void
+  language plpgsql
+  as $$ begin return; end; $$;
+comment on function psql_df_plpgsql () is 'some comment';
+\df+ psql_df_*
+                                                                                       List of functions
+ Schema |       Name       | Result data type | Argument data types | Type | Volatility | Parallel |       Owner       | Security | Access privileges | Language | Internal name | Description  
+--------+------------------+------------------+---------------------+------+------------+----------+-------------------+----------+-------------------+----------+---------------+--------------
+ public | psql_df_internal | double precision | double precision    | func | immutable  | safe     | regress_psql_user | invoker  |                   | internal | dsin          | 
+ public | psql_df_plpgsql  | void             |                     | func | volatile   | unsafe   | regress_psql_user | invoker  |                   | plpgsql  |               | some comment
+ public | psql_df_sql      | integer          | x integer           | func | volatile   | unsafe   | regress_psql_user | definer  |                   | sql      |               | 
+(3 rows)
+
+rollback;
+drop role regress_psql_user;
 -- check \sf
 \sf information_schema._pg_expandarray
 CREATE OR REPLACE FUNCTION information_schema._pg_expandarray(anyarray, OUT x anyelement, OUT n integer)
@@ -6170,9 +6199,9 @@ List of schemas
 (0 rows)
 
 \dO "no.such.collation"
-                            List of collations
- Schema | Name | Collate | Ctype | ICU Locale | Provider | Deterministic? 
---------+------+---------+-------+------------+----------+----------------
+                                  List of collations
+ Schema | Name | Provider | Collate | Ctype | ICU Locale | ICU Rules | Deterministic? 
+--------+------+----------+---------+-------+------------+-----------+----------------
 (0 rows)
 
 \dp "no.such.access.privilege"
@@ -6359,9 +6388,9 @@ cross-database references are not implemented: "no.such.schema"."no.such.languag
 (0 rows)
 
 \dO "no.such.schema"."no.such.collation"
-                            List of collations
- Schema | Name | Collate | Ctype | ICU Locale | Provider | Deterministic? 
---------+------+---------+-------+------------+----------+----------------
+                                  List of collations
+ Schema | Name | Provider | Collate | Ctype | ICU Locale | ICU Rules | Deterministic? 
+--------+------+----------+---------+-------+------------+-----------+----------------
 (0 rows)
 
 \dp "no.such.schema"."no.such.access.privilege"
@@ -6502,9 +6531,9 @@ List of text search templates
 (0 rows)
 
 \dO regression."no.such.schema"."no.such.collation"
-                            List of collations
- Schema | Name | Collate | Ctype | ICU Locale | Provider | Deterministic? 
---------+------+---------+-------+------------+----------+----------------
+                                  List of collations
+ Schema | Name | Provider | Collate | Ctype | ICU Locale | ICU Rules | Deterministic? 
+--------+------+----------+---------+-------+------------+-----------+----------------
 (0 rows)
 
 \dp regression."no.such.schema"."no.such.access.privilege"

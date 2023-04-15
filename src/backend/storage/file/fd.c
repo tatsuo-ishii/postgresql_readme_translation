@@ -98,7 +98,9 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
+#include "utils/guc_hooks.h"
 #include "utils/resowner_private.h"
+#include "utils/varlena.h"
 
 /* Define PG_FLUSH_DATA_WORKS if we have an implementation for pg_flush_data */
 #if defined(HAVE_SYNC_FILE_RANGE)
@@ -161,6 +163,9 @@ bool		data_sync_retry = false;
 
 /* How SyncDataDirectory() should do its job. */
 int			recovery_init_sync_method = RECOVERY_INIT_SYNC_METHOD_FSYNC;
+
+/* Which kinds of files should be opened with PG_O_DIRECT. */
+int			io_direct_flags;
 
 /* Debugging.... */
 
@@ -1025,7 +1030,9 @@ tryAgain:
 	 */
 	StaticAssertStmt((PG_O_DIRECT &
 					  (O_APPEND |
+					   O_CLOEXEC |
 					   O_CREAT |
+					   O_DSYNC |
 					   O_EXCL |
 					   O_RDWR |
 					   O_RDONLY |
@@ -1033,15 +1040,6 @@ tryAgain:
 					   O_TRUNC |
 					   O_WRONLY)) == 0,
 					 "PG_O_DIRECT value collides with standard flag");
-#if defined(O_CLOEXEC)
-	StaticAssertStmt((PG_O_DIRECT & O_CLOEXEC) == 0,
-					 "PG_O_DIRECT value collides with O_CLOEXEC");
-#endif
-#if defined(O_DSYNC)
-	StaticAssertStmt((PG_O_DIRECT & O_DSYNC) == 0,
-					 "PG_O_DIRECT value collides with O_DSYNC");
-#endif
-
 	fd = open(fileName, fileFlags & ~PG_O_DIRECT, fileMode);
 #else
 	fd = open(fileName, fileFlags, fileMode);
@@ -1522,6 +1520,14 @@ PathNameOpenFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	/* Close excess kernel FDs. */
 	ReleaseLruFiles();
 
+	/*
+	 * Descriptors managed by VFDs are implicitly marked O_CLOEXEC.  The
+	 * client shouldn't be expected to know which kernel descriptors are
+	 * currently open, so it wouldn't make sense for them to be inherited by
+	 * executed subprograms.
+	 */
+	fileFlags |= O_CLOEXEC;
+
 	vfdP->fd = BasicOpenFilePerm(fileName, fileFlags, fileMode);
 
 	if (vfdP->fd < 0)
@@ -1987,9 +1993,9 @@ FilePrefetch(File file, off_t offset, off_t amount, uint32 wait_event_info)
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FilePrefetch: %d (%s) " INT64_FORMAT " %d",
+	DO_DB(elog(LOG, "FilePrefetch: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
 			   file, VfdCache[file].fileName,
-			   (int64) offset, amount));
+			   (int64) offset, (int64) amount));
 
 	returnCode = FileAccess(file);
 	if (returnCode < 0)
@@ -2019,6 +2025,9 @@ FileWriteback(File file, off_t offset, off_t nbytes, uint32 wait_event_info)
 			   (int64) offset, (int64) nbytes));
 
 	if (nbytes <= 0)
+		return;
+
+	if (VfdCache[file].fileFlags & PG_O_DIRECT)
 		return;
 
 	returnCode = FileAccess(file);
@@ -2095,7 +2104,7 @@ FileWrite(File file, const void *buffer, size_t amount, off_t offset,
 
 	Assert(FileIsValid(file));
 
-	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %d %p",
+	DO_DB(elog(LOG, "FileWrite: %d (%s) " INT64_FORMAT " %zu %p",
 			   file, VfdCache[file].fileName,
 			   (int64) offset,
 			   amount, buffer));
@@ -2203,6 +2212,94 @@ FileSync(File file, uint32 wait_event_info)
 	pgstat_report_wait_end();
 
 	return returnCode;
+}
+
+/*
+ * Zero a region of the file.
+ *
+ * Returns 0 on success, -1 otherwise. In the latter case errno is set to the
+ * appropriate error.
+ */
+int
+FileZero(File file, off_t offset, off_t amount, uint32 wait_event_info)
+{
+	int			returnCode;
+	ssize_t		written;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileZero: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
+			   file, VfdCache[file].fileName,
+			   (int64) offset, (int64) amount));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return returnCode;
+
+	pgstat_report_wait_start(wait_event_info);
+	written = pg_pwrite_zeros(VfdCache[file].fd, amount, offset);
+	pgstat_report_wait_end();
+
+	if (written < 0)
+		return -1;
+	else if (written != amount)
+	{
+		/* if errno is unset, assume problem is no disk space */
+		if (errno == 0)
+			errno = ENOSPC;
+		return -1;
+	}
+
+	return 0;
+}
+
+/*
+ * Try to reserve file space with posix_fallocate(). If posix_fallocate() is
+ * not implemented on the operating system or fails with EINVAL / EOPNOTSUPP,
+ * use FileZero() instead.
+ *
+ * Note that at least glibc() implements posix_fallocate() in userspace if not
+ * implemented by the filesystem. That's not the case for all environments
+ * though.
+ *
+ * Returns 0 on success, -1 otherwise. In the latter case errno is set to the
+ * appropriate error.
+ */
+int
+FileFallocate(File file, off_t offset, off_t amount, uint32 wait_event_info)
+{
+#ifdef HAVE_POSIX_FALLOCATE
+	int			returnCode;
+
+	Assert(FileIsValid(file));
+
+	DO_DB(elog(LOG, "FileFallocate: %d (%s) " INT64_FORMAT " " INT64_FORMAT,
+			   file, VfdCache[file].fileName,
+			   (int64) offset, (int64) amount));
+
+	returnCode = FileAccess(file);
+	if (returnCode < 0)
+		return -1;
+
+	pgstat_report_wait_start(wait_event_info);
+	returnCode = posix_fallocate(VfdCache[file].fd, offset, amount);
+	pgstat_report_wait_end();
+
+	if (returnCode == 0)
+		return 0;
+
+	/* for compatibility with %m printing etc */
+	errno = returnCode;
+
+	/*
+	 * Return in cases of a "real" failure, if fallocate is not supported,
+	 * fall through to the FileZero() backed implementation.
+	 */
+	if (returnCode != EINVAL && returnCode != EOPNOTSUPP)
+		return -1;
+#endif
+
+	return FileZero(file, offset, amount, wait_event_info);
 }
 
 off_t
@@ -3736,4 +3833,94 @@ int
 data_sync_elevel(int elevel)
 {
 	return data_sync_retry ? elevel : PANIC;
+}
+
+bool
+check_io_direct(char **newval, void **extra, GucSource source)
+{
+	bool		result = true;
+	int			flags;
+
+#if PG_O_DIRECT == 0
+	if (strcmp(*newval, "") != 0)
+	{
+		GUC_check_errdetail("io_direct is not supported on this platform.");
+		result = false;
+	}
+	flags = 0;
+#else
+	List	   *elemlist;
+	ListCell   *l;
+	char	   *rawstring;
+
+	/* Need a modifiable copy of string */
+	rawstring = pstrdup(*newval);
+
+	if (!SplitGUCList(rawstring, ',', &elemlist))
+	{
+		GUC_check_errdetail("invalid list syntax in parameter \"%s\"",
+							"io_direct");
+		pfree(rawstring);
+		list_free(elemlist);
+		return false;
+	}
+
+	flags = 0;
+	foreach(l, elemlist)
+	{
+		char	   *item = (char *) lfirst(l);
+
+		if (pg_strcasecmp(item, "data") == 0)
+			flags |= IO_DIRECT_DATA;
+		else if (pg_strcasecmp(item, "wal") == 0)
+			flags |= IO_DIRECT_WAL;
+		else if (pg_strcasecmp(item, "wal_init") == 0)
+			flags |= IO_DIRECT_WAL_INIT;
+		else
+		{
+			GUC_check_errdetail("invalid option \"%s\"", item);
+			result = false;
+			break;
+		}
+	}
+
+	/*
+	 * It's possible to configure block sizes smaller than our assumed I/O
+	 * alignment size, which could result in invalid I/O requests.
+	 */
+#if XLOG_BLCKSZ < PG_IO_ALIGN_SIZE
+	if (result && (flags & (IO_DIRECT_WAL | IO_DIRECT_WAL_INIT)))
+	{
+		GUC_check_errdetail("io_direct is not supported for WAL because XLOG_BLCKSZ is too small");
+		result = false;
+	}
+#endif
+#if BLCKSZ < PG_IO_ALIGN_SIZE
+	if (result && (flags & IO_DIRECT_DATA))
+	{
+		GUC_check_errdetail("io_direct is not supported for data because BLCKSZ is too small");
+		result = false;
+	}
+#endif
+
+	pfree(rawstring);
+	list_free(elemlist);
+#endif
+
+	if (!result)
+		return result;
+
+	/* Save the flags in *extra, for use by assign_io_direct */
+	*extra = guc_malloc(ERROR, sizeof(int));
+	*((int *) *extra) = flags;
+
+	return result;
+}
+
+extern void
+assign_io_direct(const char *newval, void *extra)
+{
+	int		   *flags = (int *) extra;
+
+	io_direct_flags = *flags;
 }

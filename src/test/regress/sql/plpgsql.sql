@@ -2877,7 +2877,7 @@ create type record_type as (x text, y int, z boolean);
 
 create or replace function ret_query2(lim int) returns setof record_type as $$
 begin
-    return query select md5(s.x::text), s.x, s.x > 0
+    return query select fipshash(s.x::text), s.x, s.x > 0
                  from generate_series(-8, lim) s (x) where s.x % 2 = 0;
 end;
 $$ language plpgsql;
@@ -4206,7 +4206,7 @@ end;
 $$ language plpgsql;
 
 select outer_outer_func(10);
--- repeated call should to work
+-- repeated call should work
 select outer_outer_func(20);
 
 drop function outer_outer_func(int);
@@ -4261,12 +4261,37 @@ end;
 $$ language plpgsql;
 
 select outer_outer_func(10);
--- repeated call should to work
+-- repeated call should work
 select outer_outer_func(20);
 
 drop function outer_outer_func(int);
 drop function outer_func(int);
 drop function inner_func(int);
+
+-- Test pg_routine_oid
+create function current_function(text)
+returns regprocedure as $$
+declare
+  fn_oid regprocedure;
+begin
+  get diagnostics fn_oid = pg_routine_oid;
+  return fn_oid;
+end;
+$$ language plpgsql;
+
+select current_function('foo');
+
+drop function current_function(text);
+
+-- shouldn't fail in DO, even though there's no useful data
+do $$
+declare
+  fn_oid oid;
+begin
+  get diagnostics fn_oid = pg_routine_oid;
+  raise notice 'pg_routine_oid = %', fn_oid;
+end;
+$$;
 
 --
 -- Test ASSERT

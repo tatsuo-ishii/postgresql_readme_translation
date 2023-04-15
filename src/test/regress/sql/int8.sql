@@ -20,7 +20,7 @@ SELECT * FROM INT8_TBL;
 SELECT pg_input_is_valid('34', 'int8');
 SELECT pg_input_is_valid('asdf', 'int8');
 SELECT pg_input_is_valid('10000000000000000000', 'int8');
-SELECT pg_input_error_message('10000000000000000000', 'int8');
+SELECT * FROM pg_input_error_info('10000000000000000000', 'int8');
 
 -- int8/int8 cmp
 SELECT * FROM INT8_TBL WHERE q2 = 4567890123456789;
@@ -277,3 +277,17 @@ SELECT int8 '-0o1000000000000000000000';
 SELECT int8 '-0o1000000000000000000001';
 SELECT int8 '-0x8000000000000000';
 SELECT int8 '-0x8000000000000001';
+
+
+-- underscores
+
+SELECT int8 '1_000_000';
+SELECT int8 '1_2_3';
+SELECT int8 '0x1EEE_FFFF';
+SELECT int8 '0o2_73';
+SELECT int8 '0b_10_0101';
+
+-- error cases
+SELECT int8 '_100';
+SELECT int8 '100_';
+SELECT int8 '100__000';

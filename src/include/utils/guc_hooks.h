@@ -33,6 +33,8 @@ extern bool check_autovacuum_max_workers(int *newval, void **extra,
 										 GucSource source);
 extern bool check_autovacuum_work_mem(int *newval, void **extra,
 									  GucSource source);
+extern bool check_vacuum_buffer_usage_limit(int *newval, void **extra,
+											GucSource source);
 extern bool check_backtrace_functions(char **newval, void **extra,
 									  GucSource source);
 extern void assign_backtrace_functions(const char *newval, void *extra);
@@ -154,5 +156,7 @@ extern bool check_wal_consistency_checking(char **newval, void **extra,
 										   GucSource source);
 extern void assign_wal_consistency_checking(const char *newval, void *extra);
 extern void assign_xlog_sync_method(int new_sync_method, void *extra);
+extern bool check_io_direct(char **newval, void **extra, GucSource source);
+extern void assign_io_direct(const char *newval, void *extra);
 
 #endif							/* GUC_HOOKS_H */

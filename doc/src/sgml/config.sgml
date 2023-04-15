@@ -708,6 +708,37 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-reserved-connections" xreflabel="reserved_connections">
+      <term><varname>reserved_connections</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>reserved_connections</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Determines the number of connection <quote>slots</quote> that are
+        reserved for connections by roles with privileges of the
+        <link linkend="predefined-roles-table"><literal>pg_use_reserved_connections</literal></link>
+        role.  Whenever the number of free connection slots is greater than
+        <xref linkend="guc-superuser-reserved-connections"/> but less than or
+        equal to the sum of <varname>superuser_reserved_connections</varname>
+        and <varname>reserved_connections</varname>, new connections will be
+        accepted only for superusers and roles with privileges of
+        <literal>pg_use_reserved_connections</literal>.  If
+        <varname>superuser_reserved_connections</varname> or fewer connection
+        slots are available, new connections will be accepted only for
+        superusers.
+       </para>
+
+       <para>
+        The default value is zero connections.  The value must be less than
+        <varname>max_connections</varname> minus
+        <varname>superuser_reserved_connections</varname>.  This parameter can
+        only be set at server start.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-superuser-reserved-connections"
      xreflabel="superuser_reserved_connections">
       <term><varname>superuser_reserved_connections</varname>
@@ -725,13 +756,16 @@ include_dir 'conf.d'
         number of active concurrent connections is at least
         <varname>max_connections</varname> minus
         <varname>superuser_reserved_connections</varname>, new
-        connections will be accepted only for superusers, and no
-        new replication connections will be accepted.
+        connections will be accepted only for superusers.  The connection slots
+        reserved by this parameter are intended as final reserve for emergency
+        use after the slots reserved by
+        <xref linkend="guc-reserved-connections"/> have been exhausted.
        </para>
 
        <para>
         The default value is three connections. The value must be less
-        than <varname>max_connections</varname>.
+        than <varname>max_connections</varname> minus
+        <varname>reserved_connections</varname>.
         This parameter can only be set at server start.
        </para>
       </listitem>
@@ -759,7 +793,7 @@ include_dir 'conf.d'
        <para>
         A value that starts with <literal>@</literal> specifies that a
         Unix-domain socket in the abstract namespace should be created
-        (currently supported on Linux and Windows).  In that case, this value
+        (currently supported on Linux only).  In that case, this value
         does not specify a <quote>directory</quote> but a prefix from which
         the actual socket name is computed in the same manner as for the
         file-system namespace.  While the abstract socket name prefix can be
@@ -1098,6 +1132,26 @@ include_dir 'conf.d'
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-scram-iterations" xreflabel="scram_iterations">
+      <term><varname>scram_iterations</varname> (<type>integer</type>)
+      <indexterm>
+       <primary><varname>scram_iterations</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        The number of computational iterations to be performed when encrypting
+        a password using SCRAM-SHA-256. The default is <literal>4096</literal>.
+        A higher number of iterations provides additional protection against
+        brute-force attacks on stored passwords, but makes authentication
+        slower. Changing the value has no effect on existing passwords
+        encrypted with SCRAM-SHA-256 as the iteration count is fixed at the
+        time of encryption. In order to make use of a changed value, a new
+        password must be set.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-krb-server-keyfile" xreflabel="krb_server_keyfile">
       <term><varname>krb_server_keyfile</varname> (<type>string</type>)
       <indexterm>
@@ -1131,6 +1185,23 @@ include_dir 'conf.d'
         Sets whether GSSAPI user names should be treated
         case-insensitively.
         The default is <literal>off</literal> (case sensitive). This parameter can only be
+        set in the <filename>postgresql.conf</filename> file or on the server command line.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-gss-accept-deleg" xreflabel="gss_accept_deleg">
+      <term><varname>gss_accept_deleg</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>gss_accept_deleg</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Sets whether GSSAPI delegation should be accepted from the client.
+        The default is <literal>off</literal> meaning credentials from the client will
+        NOT be accepted.  Changing this to <literal>on</literal> will make the server
+        accept credentials delegated to it from the client. This parameter can only be
         set in the <filename>postgresql.conf</filename> file or on the server command line.
        </para>
       </listitem>
@@ -1943,6 +2014,36 @@ include_dir 'conf.d'
         setting <varname>autovacuum_work_mem</varname> to a value higher than
         that has no effect on the number of dead tuples that autovacuum can
         collect while scanning a table.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-vacuum-buffer-usage-limit" xreflabel="vacuum_buffer_usage_limit">
+      <term>
+       <varname>vacuum_buffer_usage_limit</varname> (<type>integer</type>)
+       <indexterm>
+        <primary><varname>vacuum_buffer_usage_limit</varname> configuration parameter</primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Specifies the size of the
+        <glossterm linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
+        used by the <command>VACUUM</command> and <command>ANALYZE</command>
+        commands.  A setting of <literal>0</literal> will allow the operation
+        to use any number of <varname>shared_buffers</varname>.  Otherwise
+        valid sizes range from <literal>128 kB</literal> to
+        <literal>16 GB</literal>.  If the specified size would exceed 1/8 the
+        size of <varname>shared_buffers</varname>, the size is silently capped
+        to that value.  The default value is <literal>256 kB</literal>.  If
+        this value is specified without units, it is taken as kilobytes.  This
+        parameter can be set at any time.  It can be overridden for
+        <xref linkend="sql-vacuum"/> and <xref linkend="sql-analyze"/>
+        when passing the <option>BUFFER_USAGE_LIMIT</option> option.  Higher
+        settings can allow <command>VACUUM</command> and
+        <command>ANALYZE</command> to run more quickly, but having too large a
+        setting may cause too many other useful pages to be evicted from
+        shared buffers.
        </para>
       </listitem>
      </varlistentry>
@@ -3071,7 +3172,6 @@ include_dir 'conf.d'
         </listitem>
        </itemizedlist>
        <para>
-        The <literal>open_</literal>* options also use <literal>O_DIRECT</literal> if available.
         Not all of these choices are available on all platforms.
         The default is the first method in the above list that is supported
         by the platform, except that <literal>fdatasync</literal> is the default on
@@ -4080,6 +4180,14 @@ restore_command = 'copy "C:\\server\\archivedir\\%f" "%p"'  # Windows
        </para>
 
        <para>
+        To specify a timeline ID in hexadecimal (for example, if extracted
+        from a WAL file name or history file), prefix it with a
+        <literal>0x</literal>.  For instance, if the WAL file name is
+        <filename>00000011000000A10000004F</filename>, then the timeline ID is
+        <literal>0x11</literal> (or 17 decimal).
+       </para>
+
+       <para>
         You usually only need to set this parameter
         in complex re-recovery situations, where you need to return to
         a state that itself was reached after a point-in-time recovery.
@@ -4842,6 +4950,10 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         to access WAL archives, something useful for example in cloud
         environments where the number of times an infrastructure is accessed
         is taken into account.
+       </para>
+       <para>
+        In logical replication, this parameter also limits how often a failing
+        replication apply worker will be respawned.
        </para>
       </listitem>
      </varlistentry>
@@ -9254,8 +9366,12 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        </para>
        <para>
         When the failsafe is triggered, any cost-based delay that is
-        in effect will no longer be applied, and further non-essential
-        maintenance tasks (such as index vacuuming) are bypassed.
+        in effect will no longer be applied, further non-essential
+        maintenance tasks (such as index vacuuming) are bypassed, and any
+        <glossterm linkend="glossary-buffer-access-strategy">Buffer Access Strategy</glossterm>
+        in use will be disabled resulting in <command>VACUUM</command> being
+        free to make use of all of
+        <glossterm linkend="glossary-shared-memory">shared buffers</glossterm>.
        </para>
        <para>
         The default is 1.6 billion transactions.  Although users can
@@ -9461,7 +9577,8 @@ SET XML OPTION { DOCUMENT | CONTENT };
         is set to a non-empty value, the newly-created role will be granted
         to the creating user with the options specified. The value must be
         <literal>set</literal>, <literal>inherit</literal>, or a
-        comma-separated list of these.
+        comma-separated list of these. The default value is an empty string,
+        which disables the feature.
        </para>
        <para>
         The purpose of this option is to allow a <literal>CREATEROLE</literal>
@@ -9733,6 +9850,32 @@ SET XML OPTION { DOCUMENT | CONTENT };
         set to the empty string (which is the default) then the value
         is inherited from the execution environment of the server in a
         system-dependent way.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-icu-validation-level" xreflabel="icu_validation_level">
+      <term><varname>icu_validation_level</varname> (<type>enum</type>)
+      <indexterm>
+       <primary><varname>icu_validation_level</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        When ICU locale validation problems are encountered, controls which
+        <link linkend="runtime-config-severity-levels">message level</link> is
+        used to report the problem. Valid values are
+        <literal>DISABLED</literal>, <literal>DEBUG5</literal>,
+        <literal>DEBUG4</literal>, <literal>DEBUG3</literal>,
+        <literal>DEBUG2</literal>, <literal>DEBUG1</literal>,
+        <literal>INFO</literal>, <literal>NOTICE</literal>,
+        <literal>WARNING</literal>, <literal>ERROR</literal>, and
+        <literal>LOG</literal>.
+       </para>
+       <para>
+        If set to <literal>DISABLED</literal>, does not report validation
+        problems at all. Otherwise reports problems at the given message
+        level. The default is <literal>ERROR</literal>.
        </para>
       </listitem>
      </varlistentry>
@@ -10109,13 +10252,12 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </term>
       <listitem>
        <para>
-        The shared lock table tracks locks on
-        <varname>max_locks_per_transaction</varname> * (<xref
-        linkend="guc-max-connections"/> + <xref
-        linkend="guc-max-prepared-transactions"/>) objects (e.g.,  tables);
+        The shared lock table has space for
+        <varname>max_locks_per_transaction</varname> objects
+        (e.g., tables) per server process or prepared transaction;
         hence, no more than this many distinct objects can be locked at
-        any one time.  This parameter controls the average number of object
-        locks allocated for each transaction;  individual transactions
+        any one time.  This parameter limits the average number of object
+        locks used by each transaction; individual transactions
         can lock more objects as long as the locks of all transactions
         fit in the lock table.  This is <emphasis>not</emphasis> the number of
         rows that can be locked; that value is unlimited.  The default,
@@ -10126,8 +10268,8 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
        </para>
 
        <para>
-        When running a standby server, you must set this parameter to the
-        same or higher value than on the primary server. Otherwise, queries
+        When running a standby server, you must set this parameter to have the
+        same or higher value as on the primary server. Otherwise, queries
         will not be allowed in the standby server.
        </para>
       </listitem>
@@ -10141,17 +10283,16 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </term>
       <listitem>
        <para>
-        The shared predicate lock table tracks locks on
-        <varname>max_pred_locks_per_transaction</varname> * (<xref
-        linkend="guc-max-connections"/> + <xref
-        linkend="guc-max-prepared-transactions"/>) objects (e.g., tables);
+        The shared predicate lock table has space for
+        <varname>max_pred_locks_per_transaction</varname> objects
+        (e.g., tables) per server process or prepared transaction;
         hence, no more than this many distinct objects can be locked at
-        any one time.  This parameter controls the average number of object
-        locks allocated for each transaction;  individual transactions
+        any one time.  This parameter limits the average number of object
+        locks used by each transaction; individual transactions
         can lock more objects as long as the locks of all transactions
         fit in the lock table.  This is <emphasis>not</emphasis> the number of
         rows that can be locked; that value is unlimited.  The default,
-        64, has generally been sufficient in testing, but you might need to
+        64, has historically proven sufficient, but you might need to
         raise this value if you have clients that touch many different
         tables in a single serializable transaction. This parameter can
         only be set at server start.
@@ -11053,17 +11194,17 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-force-parallel-mode" xreflabel="force_parallel_mode">
-      <term><varname>force_parallel_mode</varname> (<type>enum</type>)
+     <varlistentry id="guc-debug-parallel-query" xreflabel="debug_parallel_query">
+      <term><varname>debug_parallel_query</varname> (<type>enum</type>)
       <indexterm>
-       <primary><varname>force_parallel_mode</varname> configuration parameter</primary>
+       <primary><varname>debug_parallel_query</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
        <para>
         Allows the use of parallel queries for testing purposes even in cases
         where no performance benefit is expected.
-        The allowed values of <varname>force_parallel_mode</varname> are
+        The allowed values of <varname>debug_parallel_query</varname> are
         <literal>off</literal> (use parallel mode only when it is expected to improve
         performance), <literal>on</literal> (force parallel query for all queries
         for which it is thought to be safe), and <literal>regress</literal> (like
@@ -11110,6 +11251,38 @@ dynamic_library_path = 'C:\tools\postgresql;H:\my_project\lib;$libdir'
         update the indexes when modifying the tables).  This is useful
         when recovering from damaged system indexes.
         This parameter cannot be changed after session start.
+       </para>
+      </listitem>
+     </varlistentry>
+
+     <varlistentry id="guc-io-direct" xreflabel="io_direct">
+      <term><varname>io_direct</varname> (<type>string</type>)
+      <indexterm>
+        <primary><varname>io_direct</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Ask the kernel to minimize caching effects for relation data and WAL
+        files using <literal>O_DIRECT</literal> (most Unix-like systems),
+        <literal>F_NOCACHE</literal> (macOS) or
+        <literal>FILE_FLAG_NO_BUFFERING</literal> (Windows).
+       </para>
+       <para>
+        May be set to an empty string (the default) to disable use of direct
+        I/O, or a comma-separated list of operations that should use direct I/O.
+        The valid options are <literal>data</literal> for
+        main data files, <literal>wal</literal> for WAL files, and
+        <literal>wal_init</literal> for WAL files when being initially
+        allocated.
+       </para>
+       <para>
+        Some operating systems and file systems do not support direct I/O, so
+        non-default settings may be rejected at startup or cause errors.
+       </para>
+       <para>
+        Currently this feature reduces performance, and is intended for
+        developer testing only.
        </para>
       </listitem>
      </varlistentry>
@@ -11655,30 +11828,44 @@ LOG:  CleanUpLock: deleting: lock(0xb7acd844) id(24688,24696,0,0,0,1)
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-logical-decoding-mode" xreflabel="logical_decoding_mode">
-      <term><varname>logical_decoding_mode</varname> (<type>enum</type>)
+     <varlistentry id="guc-logical-replication-mode" xreflabel="logical_replication_mode">
+      <term><varname>logical_replication_mode</varname> (<type>enum</type>)
       <indexterm>
-       <primary><varname>logical_decoding_mode</varname> configuration parameter</primary>
+       <primary><varname>logical_replication_mode</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
        <para>
-        Allows streaming or serializing changes immediately in logical decoding.
-        The allowed values of <varname>logical_decoding_mode</varname> are
-        <literal>buffered</literal> and <literal>immediate</literal>. When set
-        to <literal>immediate</literal>, stream each change if
-        <literal>streaming</literal> option (see optional parameters set by
-        <link linkend="sql-createsubscription"><command>CREATE SUBSCRIPTION</command></link>)
-        is enabled, otherwise, serialize each change.  When set to
-        <literal>buffered</literal>, which is the default, decoding will stream
-        or serialize changes when <varname>logical_decoding_work_mem</varname>
-        is reached.
-       </para>
-       <para>
+        The allowed values are <literal>buffered</literal> and
+        <literal>immediate</literal>. The default is <literal>buffered</literal>.
         This parameter is intended to be used to test logical decoding and
-        replication of large transactions for which otherwise we need to
-        generate the changes till <varname>logical_decoding_work_mem</varname>
-        is reached.
+        replication of large transactions.  The effect of
+        <varname>logical_replication_mode</varname> is different for the
+        publisher and subscriber:
+       </para>
+
+       <para>
+        On the publisher side, <varname>logical_replication_mode</varname>
+        allows streaming or serializing changes immediately in logical decoding.
+        When set to <literal>immediate</literal>, stream each change if the
+        <link linkend="sql-createsubscription-with-streaming"><literal>streaming</literal></link>
+        option of
+        <link linkend="sql-createsubscription"><command>CREATE SUBSCRIPTION</command></link>
+        is enabled, otherwise, serialize each change.  When set to
+        <literal>buffered</literal>, the decoding will stream or serialize
+        changes when <varname>logical_decoding_work_mem</varname> is reached.
+       </para>
+
+       <para>
+        On the subscriber side, if the <literal>streaming</literal> option is set to
+        <literal>parallel</literal>, <varname>logical_replication_mode</varname>
+        can be used to direct the leader apply worker to send changes to the
+        shared memory queue or to serialize all changes to the file.  When set to
+        <literal>buffered</literal>, the leader sends changes to parallel apply
+        workers via a shared memory queue.  When set to
+        <literal>immediate</literal>, the leader serializes all changes to files
+        and notifies the parallel apply workers to read and apply them at the
+        end of the transaction.
        </para>
       </listitem>
      </varlistentry>

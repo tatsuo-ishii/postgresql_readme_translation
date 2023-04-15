@@ -144,6 +144,10 @@ static int	CheckLDAPAuth(Port *port);
 #define LDAP_OPT_DIAGNOSTIC_MESSAGE LDAP_OPT_ERROR_STRING
 #endif
 
+/* Default LDAP password mutator hook, can be overridden by a shared library */
+static char *dummy_ldap_password_mutator(char *input);
+auth_password_hook_typ ldap_password_hook = dummy_ldap_password_mutator;
+
 #endif							/* USE_LDAP */
 
 /*----------------------------------------------------------------
@@ -161,6 +165,7 @@ static int	CheckCertAuth(Port *port);
  */
 char	   *pg_krb_server_keyfile;
 bool		pg_krb_caseins_users;
+bool		pg_gss_accept_deleg;
 
 
 /*----------------------------------------------------------------
@@ -914,10 +919,12 @@ pg_GSS_recvauth(Port *port)
 	int			mtype;
 	StringInfoData buf;
 	gss_buffer_desc gbuf;
+	gss_cred_id_t delegated_creds;
 
 	/*
-	 * Use the configured keytab, if there is one.  Unfortunately, Heimdal
-	 * doesn't support the cred store extensions, so use the env var.
+	 * Use the configured keytab, if there is one.  As we now require MIT
+	 * Kerberos, we might consider using the credential store extensions in
+	 * the future instead of the environment variable.
 	 */
 	if (pg_krb_server_keyfile != NULL && pg_krb_server_keyfile[0] != '\0')
 	{
@@ -942,6 +949,9 @@ pg_GSS_recvauth(Port *port)
 	 * Initialize sequence with an empty context
 	 */
 	port->gss->ctx = GSS_C_NO_CONTEXT;
+
+	delegated_creds = GSS_C_NO_CREDENTIAL;
+	port->gss->delegated_creds = false;
 
 	/*
 	 * Loop through GSSAPI message exchange. This exchange can consist of
@@ -993,7 +1003,7 @@ pg_GSS_recvauth(Port *port)
 										  &port->gss->outbuf,
 										  &gflags,
 										  NULL,
-										  NULL);
+										  pg_gss_accept_deleg ? &delegated_creds : NULL);
 
 		/* gbuf no longer used */
 		pfree(buf.data);
@@ -1004,6 +1014,12 @@ pg_GSS_recvauth(Port *port)
 			 (unsigned int) port->gss->outbuf.length, gflags);
 
 		CHECK_FOR_INTERRUPTS();
+
+		if (delegated_creds != GSS_C_NO_CREDENTIAL && gflags & GSS_C_DELEG_FLAG)
+		{
+			pg_store_delegated_credential(delegated_creds);
+			port->gss->delegated_creds = true;
+		}
 
 		if (port->gss->outbuf.length != 0)
 		{
@@ -2370,6 +2386,12 @@ InitializeLDAPConnection(Port *port, LDAP **ldap)
 #define LDAPS_PORT 636
 #endif
 
+static char *
+dummy_ldap_password_mutator(char *input)
+{
+	return input;
+}
+
 /*
  * Return a newly allocated C string copied from "pattern" with all
  * occurrences of the placeholder "$username" replaced with "user_name".
@@ -2498,7 +2520,7 @@ CheckLDAPAuth(Port *port)
 		 */
 		r = ldap_simple_bind_s(ldap,
 							   port->hba->ldapbinddn ? port->hba->ldapbinddn : "",
-							   port->hba->ldapbindpasswd ? port->hba->ldapbindpasswd : "");
+							   port->hba->ldapbindpasswd ? ldap_password_hook(port->hba->ldapbindpasswd) : "");
 		if (r != LDAP_SUCCESS)
 		{
 			ereport(LOG,

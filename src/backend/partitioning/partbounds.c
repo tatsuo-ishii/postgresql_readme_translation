@@ -531,7 +531,7 @@ create_list_bounds(PartitionBoundSpec **boundspecs, int nparts,
 	Assert(j == ndatums);
 
 	qsort_arg(all_values, ndatums, sizeof(PartitionListValue),
-			  qsort_partition_list_value_cmp, (void *) key);
+			  qsort_partition_list_value_cmp, key);
 
 	boundinfo->ndatums = ndatums;
 	boundinfo->datums = (Datum **) palloc0(ndatums * sizeof(Datum *));
@@ -737,7 +737,7 @@ create_range_bounds(PartitionBoundSpec **boundspecs, int nparts,
 	qsort_arg(all_bounds, ndatums,
 			  sizeof(PartitionRangeBound *),
 			  qsort_partition_rbound_cmp,
-			  (void *) key);
+			  key);
 
 	/* Save distinct bounds from all_bounds into rbounds. */
 	rbounds = (PartitionRangeBound **)
@@ -4311,19 +4311,14 @@ get_qual_for_range(Relation parent, PartitionBoundSpec *spec,
 			Oid			inhrelid = inhoids[k];
 			HeapTuple	tuple;
 			Datum		datum;
-			bool		isnull;
 			PartitionBoundSpec *bspec;
 
 			tuple = SearchSysCache1(RELOID, inhrelid);
 			if (!HeapTupleIsValid(tuple))
 				elog(ERROR, "cache lookup failed for relation %u", inhrelid);
 
-			datum = SysCacheGetAttr(RELOID, tuple,
-									Anum_pg_class_relpartbound,
-									&isnull);
-			if (isnull)
-				elog(ERROR, "null relpartbound for relation %u", inhrelid);
-
+			datum = SysCacheGetAttrNotNull(RELOID, tuple,
+										   Anum_pg_class_relpartbound);
 			bspec = (PartitionBoundSpec *)
 				stringToNode(TextDatumGetCString(datum));
 			if (!IsA(bspec, PartitionBoundSpec))

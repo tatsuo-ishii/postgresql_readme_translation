@@ -2412,7 +2412,7 @@ deparseAnalyzeInfoSql(StringInfo buf, Relation rel)
  *
  * We could also do "ORDER BY random() LIMIT x", which would always pick
  * the expected number of rows, but it requires sorting so it may be much
- * more expensive (particularly on large tables, which is what what the
+ * more expensive (particularly on large tables, which is what the
  * remote sampling is meant to improve).
  */
 void
@@ -4026,7 +4026,17 @@ get_relation_column_alias_ids(Var *node, RelOptInfo *foreignrel,
 	i = 1;
 	foreach(lc, foreignrel->reltarget->exprs)
 	{
-		if (equal(lfirst(lc), (Node *) node))
+		Var		   *tlvar = (Var *) lfirst(lc);
+
+		/*
+		 * Match reltarget entries only on varno/varattno.  Ideally there
+		 * would be some cross-check on varnullingrels, but it's unclear what
+		 * to do exactly; we don't have enough context to know what that value
+		 * should be.
+		 */
+		if (IsA(tlvar, Var) &&
+			tlvar->varno == node->varno &&
+			tlvar->varattno == node->varattno)
 		{
 			*colno = i;
 			return;

@@ -1449,7 +1449,7 @@ pg_publication_tables| SELECT p.pubname,
           WHERE ((a.attrelid = gpt.relid) AND (a.attnum = ANY ((gpt.attrs)::smallint[])))) AS attnames,
     pg_get_expr(gpt.qual, gpt.relid) AS rowfilter
    FROM pg_publication p,
-    LATERAL pg_get_publication_tables((p.pubname)::text) gpt(relid, attrs, qual),
+    LATERAL pg_get_publication_tables(VARIADIC ARRAY[(p.pubname)::text]) gpt(pubid, relid, attrs, qual),
     (pg_class c
      JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
   WHERE (c.oid = gpt.relid);
@@ -1472,8 +1472,9 @@ pg_replication_slots| SELECT l.slot_name,
     l.confirmed_flush_lsn,
     l.wal_status,
     l.safe_wal_size,
-    l.two_phase
-   FROM (pg_get_replication_slots() l(slot_name, plugin, slot_type, datoid, temporary, active, active_pid, xmin, catalog_xmin, restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size, two_phase)
+    l.two_phase,
+    l.conflicting
+   FROM (pg_get_replication_slots() l(slot_name, plugin, slot_type, datoid, temporary, active, active_pid, xmin, catalog_xmin, restart_lsn, confirmed_flush_lsn, wal_status, safe_wal_size, two_phase, conflicting)
      LEFT JOIN pg_database d ON ((l.datoid = d.oid)));
 pg_roles| SELECT pg_authid.rolname,
     pg_authid.rolsuper,
@@ -1759,7 +1760,7 @@ pg_stat_activity| SELECT s.datid,
     s.query_id,
     s.query,
     s.backend_type
-   FROM ((pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, leader_pid, query_id)
+   FROM ((pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, gss_deleg, leader_pid, query_id)
      LEFT JOIN pg_database d ON ((s.datid = d.oid)))
      LEFT JOIN pg_authid u ON ((s.usesysid = u.oid)));
 pg_stat_all_indexes| SELECT c.oid AS relid,
@@ -1789,6 +1790,7 @@ pg_stat_all_tables| SELECT c.oid AS relid,
     pg_stat_get_tuples_updated(c.oid) AS n_tup_upd,
     pg_stat_get_tuples_deleted(c.oid) AS n_tup_del,
     pg_stat_get_tuples_hot_updated(c.oid) AS n_tup_hot_upd,
+    pg_stat_get_tuples_newpage_updated(c.oid) AS n_tup_newpage_upd,
     pg_stat_get_live_tuples(c.oid) AS n_live_tup,
     pg_stat_get_dead_tuples(c.oid) AS n_dead_tup,
     pg_stat_get_mod_since_analyze(c.oid) AS n_mod_since_analyze,
@@ -1868,14 +1870,33 @@ pg_stat_database_conflicts| SELECT oid AS datid,
     pg_stat_get_db_conflict_lock(oid) AS confl_lock,
     pg_stat_get_db_conflict_snapshot(oid) AS confl_snapshot,
     pg_stat_get_db_conflict_bufferpin(oid) AS confl_bufferpin,
-    pg_stat_get_db_conflict_startup_deadlock(oid) AS confl_deadlock
+    pg_stat_get_db_conflict_startup_deadlock(oid) AS confl_deadlock,
+    pg_stat_get_db_conflict_logicalslot(oid) AS confl_active_logicalslot
    FROM pg_database d;
 pg_stat_gssapi| SELECT pid,
     gss_auth AS gss_authenticated,
     gss_princ AS principal,
-    gss_enc AS encrypted
-   FROM pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, leader_pid, query_id)
+    gss_enc AS encrypted,
+    gss_deleg AS credentials_delegated
+   FROM pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, gss_deleg, leader_pid, query_id)
   WHERE (client_port IS NOT NULL);
+pg_stat_io| SELECT backend_type,
+    io_object,
+    io_context,
+    reads,
+    read_time,
+    writes,
+    write_time,
+    extends,
+    extend_time,
+    op_bytes,
+    hits,
+    evictions,
+    reuses,
+    fsyncs,
+    fsync_time,
+    stats_reset
+   FROM pg_stat_get_io() b(backend_type, io_object, io_context, reads, read_time, writes, write_time, extends, extend_time, op_bytes, hits, evictions, reuses, fsyncs, fsync_time, stats_reset);
 pg_stat_progress_analyze| SELECT s.pid,
     s.datid,
     d.datname,
@@ -2055,7 +2076,7 @@ pg_stat_replication| SELECT s.pid,
     w.sync_priority,
     w.sync_state,
     w.reply_time
-   FROM ((pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, leader_pid, query_id)
+   FROM ((pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, gss_deleg, leader_pid, query_id)
      JOIN pg_stat_get_wal_senders() w(pid, state, sent_lsn, write_lsn, flush_lsn, replay_lsn, write_lag, flush_lag, replay_lag, sync_priority, sync_state, reply_time) ON ((s.pid = w.pid)))
      LEFT JOIN pg_authid u ON ((s.usesysid = u.oid)));
 pg_stat_replication_slots| SELECT s.slot_name,
@@ -2089,7 +2110,7 @@ pg_stat_ssl| SELECT pid,
     ssl_client_dn AS client_dn,
     ssl_client_serial AS client_serial,
     ssl_issuer_dn AS issuer_dn
-   FROM pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, leader_pid, query_id)
+   FROM pg_stat_get_activity(NULL::integer) s(datid, pid, usesysid, application_name, state, query, wait_event_type, wait_event, xact_start, query_start, backend_start, state_change, client_addr, client_hostname, client_port, backend_xid, backend_xmin, backend_type, ssl, sslversion, sslcipher, sslbits, ssl_client_dn, ssl_client_serial, ssl_issuer_dn, gss_auth, gss_princ, gss_enc, gss_deleg, leader_pid, query_id)
   WHERE (client_port IS NOT NULL);
 pg_stat_subscription| SELECT su.oid AS subid,
     su.subname,
@@ -2134,6 +2155,7 @@ pg_stat_sys_tables| SELECT relid,
     n_tup_upd,
     n_tup_del,
     n_tup_hot_upd,
+    n_tup_newpage_upd,
     n_live_tup,
     n_dead_tup,
     n_mod_since_analyze,
@@ -2181,6 +2203,7 @@ pg_stat_user_tables| SELECT relid,
     n_tup_upd,
     n_tup_del,
     n_tup_hot_upd,
+    n_tup_newpage_upd,
     n_live_tup,
     n_dead_tup,
     n_mod_since_analyze,
@@ -2232,7 +2255,8 @@ pg_stat_xact_all_tables| SELECT c.oid AS relid,
     pg_stat_get_xact_tuples_inserted(c.oid) AS n_tup_ins,
     pg_stat_get_xact_tuples_updated(c.oid) AS n_tup_upd,
     pg_stat_get_xact_tuples_deleted(c.oid) AS n_tup_del,
-    pg_stat_get_xact_tuples_hot_updated(c.oid) AS n_tup_hot_upd
+    pg_stat_get_xact_tuples_hot_updated(c.oid) AS n_tup_hot_upd,
+    pg_stat_get_xact_tuples_newpage_updated(c.oid) AS n_tup_newpage_upd
    FROM ((pg_class c
      LEFT JOIN pg_index i ON ((c.oid = i.indrelid)))
      LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
@@ -2248,7 +2272,8 @@ pg_stat_xact_sys_tables| SELECT relid,
     n_tup_ins,
     n_tup_upd,
     n_tup_del,
-    n_tup_hot_upd
+    n_tup_hot_upd,
+    n_tup_newpage_upd
    FROM pg_stat_xact_all_tables
   WHERE ((schemaname = ANY (ARRAY['pg_catalog'::name, 'information_schema'::name])) OR (schemaname ~ '^pg_toast'::text));
 pg_stat_xact_user_functions| SELECT p.oid AS funcid,
@@ -2270,7 +2295,8 @@ pg_stat_xact_user_tables| SELECT relid,
     n_tup_ins,
     n_tup_upd,
     n_tup_del,
-    n_tup_hot_upd
+    n_tup_hot_upd,
+    n_tup_newpage_upd
    FROM pg_stat_xact_all_tables
   WHERE ((schemaname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (schemaname !~ '^pg_toast'::text));
 pg_statio_all_indexes| SELECT c.oid AS relid,
@@ -2986,28 +3012,21 @@ select * from rules_log;
 (16 rows)
 
 create rule r4 as on delete to rules_src do notify rules_src_deletion;
-\d+ rules_src
-                                 Table "public.rules_src"
- Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
---------+---------+-----------+----------+---------+---------+--------------+-------------
- f1     | integer |           |          |         | plain   |              | 
- f2     | integer |           |          | 0       | plain   |              | 
-Rules:
-    r1 AS
-    ON UPDATE TO rules_src DO  INSERT INTO rules_log (f1, f2, tag, id) VALUES (old.f1,old.f2,'old'::text,DEFAULT), (new.f1,new.f2,'new'::text,DEFAULT)
-    r2 AS
-    ON UPDATE TO rules_src DO  VALUES (old.f1,old.f2,'old'::text), (new.f1,new.f2,'new'::text)
-    r3 AS
-    ON INSERT TO rules_src DO  INSERT INTO rules_log (f1, f2, tag, id) VALUES (NULL::integer,NULL::integer,'-'::text,DEFAULT), (new.f1,new.f2,'new'::text,DEFAULT)
-    r4 AS
-    ON DELETE TO rules_src DO
- NOTIFY rules_src_deletion
-
 --
 -- Ensure an aliased target relation for insert is correctly deparsed.
 --
 create rule r5 as on insert to rules_src do instead insert into rules_log AS trgt SELECT NEW.* RETURNING trgt.f1, trgt.f2;
 create rule r6 as on update to rules_src do instead UPDATE rules_log AS trgt SET tag = 'updated' WHERE trgt.f1 = new.f1;
+--
+-- Check deparse disambiguation of INSERT/UPDATE/DELETE targets.
+--
+create rule r7 as on delete to rules_src do instead
+  with wins as (insert into int4_tbl as trgt values (0) returning *),
+       wupd as (update int4_tbl trgt set f1 = f1+1 returning *),
+       wdel as (delete from int4_tbl trgt where f1 = 0 returning *)
+  insert into rules_log AS trgt select old.* from wins, wupd, wdel
+  returning trgt.f1, trgt.f2;
+-- check display of all rules added above
 \d+ rules_src
                                  Table "public.rules_src"
  Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
@@ -3032,6 +3051,26 @@ Rules:
     r6 AS
     ON UPDATE TO rules_src DO INSTEAD  UPDATE rules_log trgt SET tag = 'updated'::text
   WHERE trgt.f1 = new.f1
+    r7 AS
+    ON DELETE TO rules_src DO INSTEAD  WITH wins AS (
+         INSERT INTO int4_tbl AS trgt_1 (f1)
+          VALUES (0)
+          RETURNING trgt_1.f1
+        ), wupd AS (
+         UPDATE int4_tbl trgt_1 SET f1 = trgt_1.f1 + 1
+          RETURNING trgt_1.f1
+        ), wdel AS (
+         DELETE FROM int4_tbl trgt_1
+          WHERE trgt_1.f1 = 0
+          RETURNING trgt_1.f1
+        )
+ INSERT INTO rules_log AS trgt (f1, f2)  SELECT old.f1,
+            old.f2
+           FROM wins,
+            wupd,
+            wdel
+  RETURNING trgt.f1,
+    trgt.f2
 
 --
 -- Also check multiassignment deparsing.
@@ -3057,6 +3096,31 @@ Rules:
     new.f2
 
 drop table rule_t1, rule_dest;
+--
+-- Test implicit LATERAL references to old/new in rules
+--
+CREATE TABLE rule_t1(a int, b text DEFAULT 'xxx', c int);
+CREATE VIEW rule_v1 AS SELECT * FROM rule_t1;
+CREATE RULE v1_ins AS ON INSERT TO rule_v1
+  DO ALSO INSERT INTO rule_t1
+  SELECT * FROM (SELECT a + 10 FROM rule_t1 WHERE a = NEW.a) tt;
+CREATE RULE v1_upd AS ON UPDATE TO rule_v1
+  DO ALSO UPDATE rule_t1 t
+  SET c = tt.a * 10
+  FROM (SELECT a FROM rule_t1 WHERE a = OLD.a) tt WHERE t.a = tt.a;
+INSERT INTO rule_v1 VALUES (1, 'a'), (2, 'b');
+UPDATE rule_v1 SET b = upper(b);
+SELECT * FROM rule_t1;
+ a  |  b  |  c  
+----+-----+-----
+  1 | A   |  10
+  2 | B   |  20
+ 11 | XXX | 110
+ 12 | XXX | 120
+(4 rows)
+
+DROP TABLE rule_t1 CASCADE;
+NOTICE:  drop cascades to view rule_v1
 --
 -- check alter rename rule
 --

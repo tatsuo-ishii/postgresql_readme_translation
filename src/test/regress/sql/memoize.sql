@@ -47,12 +47,14 @@ WHERE t2.unique1 < 1000;
 -- Try with LATERAL joins
 SELECT explain_memoize('
 SELECT COUNT(*),AVG(t2.unique1) FROM tenk1 t1,
-LATERAL (SELECT t2.unique1 FROM tenk1 t2 WHERE t1.twenty = t2.unique1) t2
+LATERAL (SELECT t2.unique1 FROM tenk1 t2
+         WHERE t1.twenty = t2.unique1 OFFSET 0) t2
 WHERE t1.unique1 < 1000;', false);
 
 -- And check we get the expected results.
 SELECT COUNT(*),AVG(t2.unique1) FROM tenk1 t1,
-LATERAL (SELECT t2.unique1 FROM tenk1 t2 WHERE t1.twenty = t2.unique1) t2
+LATERAL (SELECT t2.unique1 FROM tenk1 t2
+         WHERE t1.twenty = t2.unique1 OFFSET 0) t2
 WHERE t1.unique1 < 1000;
 
 -- Reduce work_mem and hash_mem_multiplier so that we see some cache evictions
@@ -89,7 +91,7 @@ DROP TABLE flt;
 CREATE TABLE strtest (n name, t text);
 CREATE INDEX strtest_n_idx ON strtest (n);
 CREATE INDEX strtest_t_idx ON strtest (t);
-INSERT INTO strtest VALUES('one','one'),('two','two'),('three',repeat(md5('three'),100));
+INSERT INTO strtest VALUES('one','one'),('two','two'),('three',repeat(fipshash('three'),100));
 -- duplicate rows so we get some cache hits
 INSERT INTO strtest SELECT * FROM strtest;
 ANALYZE strtest;
@@ -118,6 +120,14 @@ ANALYZE prt;
 
 SELECT explain_memoize('
 SELECT * FROM prt t1 INNER JOIN prt t2 ON t1.a = t2.a;', false);
+
+-- Ensure memoize works with parameterized union-all Append path
+SET enable_partitionwise_join TO off;
+
+SELECT explain_memoize('
+SELECT * FROM prt_p1 t1 INNER JOIN
+(SELECT * FROM prt_p1 UNION ALL SELECT * FROM prt_p2) t2
+ON t1.a = t2.a;', false);
 
 DROP TABLE prt;
 

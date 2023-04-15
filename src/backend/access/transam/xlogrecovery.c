@@ -385,6 +385,7 @@ static bool recoveryStopAfter;
 /* prototypes for local functions */
 static void ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *replayTLI);
 
+static void EnableStandbyMode(void);
 static void readRecoverySignalFile(void);
 static void validateRecoveryParameters(void);
 static bool read_backup_label(XLogRecPtr *checkPointLoc,
@@ -467,6 +468,24 @@ XLogRecoveryShmemInit(void)
 	SpinLockInit(&XLogRecoveryCtl->info_lck);
 	InitSharedLatch(&XLogRecoveryCtl->recoveryWakeupLatch);
 	ConditionVariableInit(&XLogRecoveryCtl->recoveryNotPausedCV);
+}
+
+/*
+ * A thin wrapper to enable StandbyMode and do other preparatory work as
+ * needed.
+ */
+static void
+EnableStandbyMode(void)
+{
+	StandbyMode = true;
+
+	/*
+	 * To avoid server log bloat, we don't report recovery progress in a
+	 * standby as it will always be in recovery unless promoted. We disable
+	 * startup progress timeout in standby mode to avoid calling
+	 * startup_progress_timeout_handler() unnecessarily.
+	 */
+	disable_startup_progress_timeout();
 }
 
 /*
@@ -602,7 +621,7 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		 */
 		InArchiveRecovery = true;
 		if (StandbyModeRequested)
-			StandbyMode = true;
+			EnableStandbyMode();
 
 		/*
 		 * When a backup_label file is present, we want to roll forward from
@@ -739,7 +758,7 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		{
 			InArchiveRecovery = true;
 			if (StandbyModeRequested)
-				StandbyMode = true;
+				EnableStandbyMode();
 		}
 
 		/* Get the last valid checkpoint record. */
@@ -1916,6 +1935,31 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 	XLogRecoveryCtl->lastReplayedTLI = *replayTLI;
 	SpinLockRelease(&XLogRecoveryCtl->info_lck);
 
+	/* ------
+	 * Wakeup walsenders:
+	 *
+	 * On the standby, the WAL is flushed first (which will only wake up
+	 * physical walsenders) and then applied, which will only wake up logical
+	 * walsenders.
+	 *
+	 * Indeed, logical walsenders on standby can't decode and send data until
+	 * it's been applied.
+	 *
+	 * Physical walsenders don't need to be woken up during replay unless
+	 * cascading replication is allowed and time line change occurred (so that
+	 * they can notice that they are on a new time line).
+	 *
+	 * That's why the wake up conditions are for:
+	 *
+	 *  - physical walsenders in case of new time line and cascade
+	 *    replication is allowed
+	 *  - logical walsenders in case cascade replication is allowed (could not
+	 *    be created otherwise)
+	 * ------
+	 */
+	if (AllowCascadeReplication())
+		WalSndWakeup(switchedTLI, true);
+
 	/*
 	 * If rm_redo called XLogRequestWalReceiverReply, then we wake up the
 	 * receiver so that it notices the updated lastReplayedEndRecPtr and sends
@@ -1938,12 +1982,6 @@ ApplyWalRecord(XLogReaderState *xlogreader, XLogRecord *record, TimeLineID *repl
 		 * bogus) future WAL segments on the old timeline.
 		 */
 		RemoveNonParentXlogFiles(xlogreader->EndRecPtr, *replayTLI);
-
-		/*
-		 * Wake up any walsenders to notice that we are on a new timeline.
-		 */
-		if (AllowCascadeReplication())
-			WalSndWakeup();
 
 		/* Reset the prefetcher. */
 		XLogPrefetchReconfigure();
@@ -3031,9 +3069,9 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 		{
 			/*
 			 * When we find that WAL ends in an incomplete record, keep track
-			 * of that record.  After recovery is done, we'll write a record to
-			 * indicate to downstream WAL readers that that portion is to be
-			 * ignored.
+			 * of that record.  After recovery is done, we'll write a record
+			 * to indicate to downstream WAL readers that that portion is to
+			 * be ignored.
 			 *
 			 * However, when ArchiveRecoveryRequested = true, we're going to
 			 * switch to a new timeline at the end of recovery. We will only
@@ -3117,7 +3155,7 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 						(errmsg_internal("reached end of WAL in pg_wal, entering archive recovery")));
 				InArchiveRecovery = true;
 				if (StandbyModeRequested)
-					StandbyMode = true;
+					EnableStandbyMode();
 
 				SwitchIntoArchiveRecovery(xlogreader->EndRecPtr, replayTLI);
 				minRecoveryPoint = xlogreader->EndRecPtr;
@@ -3145,10 +3183,12 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
 }
 
 /*
- * Read the XLOG page containing RecPtr into readBuf (if not read already).
- * Returns number of bytes read, if the page is read successfully, or
- * XLREAD_FAIL in case of errors.  When errors occur, they are ereport'ed, but
- * only if they have not been previously reported.
+ * Read the XLOG page containing targetPagePtr into readBuf (if not read
+ * already).  Returns number of bytes read, if the page is read successfully,
+ * or XLREAD_FAIL in case of errors.  When errors occur, they are ereport'ed,
+ * but only if they have not been previously reported.
+ *
+ * See XLogReaderRoutine.page_read for more details.
  *
  * While prefetching, xlogreader->nonblocking may be set.  In that case,
  * returns XLREAD_WOULDBLOCK if we'd otherwise have to wait for more WAL.
@@ -3156,11 +3196,11 @@ ReadRecord(XLogPrefetcher *xlogprefetcher, int emode,
  * This is responsible for restoring files from archive as needed, as well
  * as for waiting for the requested WAL record to arrive in standby mode.
  *
- * 'emode' specifies the log level used for reporting "file not found" or
- * "end of WAL" situations in archive recovery, or in standby mode when
- * promotion is triggered. If set to WARNING or below, XLogPageRead() returns
- * XLREAD_FAIL in those situations, on higher log levels the ereport() won't
- * return.
+ * xlogreader->private_data->emode specifies the log level used for reporting
+ * "file not found" or "end of WAL" situations in archive recovery, or in
+ * standby mode when promotion is triggered. If set to WARNING or below,
+ * XLogPageRead() returns XLREAD_FAIL in those situations, on higher log
+ * levels the ereport() won't return.
  *
  * In standby mode, if after a successful return of XLogPageRead() the
  * caller finds the record it's interested in to be broken, it should

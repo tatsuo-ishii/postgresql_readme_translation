@@ -162,7 +162,7 @@ static bool do_connect(enum trivalue reuse_previous_specification,
 static bool do_edit(const char *filename_arg, PQExpBuffer query_buf,
 					int lineno, bool discard_on_quit, bool *edited);
 static bool do_shell(const char *command);
-static bool do_watch(PQExpBuffer query_buf, double sleep);
+static bool do_watch(PQExpBuffer query_buf, double sleep, int iter);
 static bool lookup_object_oid(EditableObjectType obj_type, const char *desc,
 							  Oid *obj_oid);
 static bool get_create_object_cmd(EditableObjectType obj_type, Oid oid,
@@ -480,7 +480,7 @@ exec_command_bind(PsqlScanState scan_state, bool active_branch)
 				nalloc = nalloc ? nalloc * 2 : 1;
 				pset.bind_params = pg_realloc_array(pset.bind_params, char *, nalloc);
 			}
-			pset.bind_params[nparams - 1] = pg_strdup(opt);
+			pset.bind_params[nparams - 1] = opt;
 		}
 
 		pset.bind_nparams = nparams;
@@ -2734,6 +2734,7 @@ exec_command_write(PsqlScanState scan_state, bool active_branch,
 					pg_log_error("%s: %s", fname, wait_result_to_str(result));
 					status = PSQL_CMD_ERROR;
 				}
+				SetShellResultVariables(result);
 			}
 			else
 			{
@@ -2759,7 +2760,8 @@ exec_command_write(PsqlScanState scan_state, bool active_branch,
 }
 
 /*
- * \watch -- execute a query every N seconds
+ * \watch -- execute a query every N seconds.
+ * Optionally, stop after M iterations.
  */
 static backslashResult
 exec_command_watch(PsqlScanState scan_state, bool active_branch,
@@ -2769,23 +2771,109 @@ exec_command_watch(PsqlScanState scan_state, bool active_branch,
 
 	if (active_branch)
 	{
-		char	   *opt = psql_scan_slash_option(scan_state,
-												 OT_NORMAL, NULL, true);
+		bool		have_sleep = false;
+		bool		have_iter = false;
 		double		sleep = 2;
+		int			iter = 0;
 
-		/* Convert optional sleep-length argument */
-		if (opt)
+		/*
+		 * Parse arguments.  We allow either an unlabeled interval or
+		 * "name=value", where name is from the set ('i', 'interval', 'c',
+		 * 'count').
+		 */
+		while (success)
 		{
-			sleep = strtod(opt, NULL);
-			if (sleep <= 0)
-				sleep = 1;
+			char	   *opt = psql_scan_slash_option(scan_state,
+													 OT_NORMAL, NULL, true);
+			char	   *valptr;
+			char	   *opt_end;
+
+			if (!opt)
+				break;			/* no more arguments */
+
+			valptr = strchr(opt, '=');
+			if (valptr)
+			{
+				/* Labeled argument */
+				valptr++;
+				if (strncmp("i=", opt, strlen("i=")) == 0 ||
+					strncmp("interval=", opt, strlen("interval=")) == 0)
+				{
+					if (have_sleep)
+					{
+						pg_log_error("\\watch: interval value is specified more than once");
+						success = false;
+					}
+					else
+					{
+						have_sleep = true;
+						errno = 0;
+						sleep = strtod(valptr, &opt_end);
+						if (sleep < 0 || *opt_end || errno == ERANGE)
+						{
+							pg_log_error("\\watch: incorrect interval value \"%s\"", valptr);
+							success = false;
+						}
+					}
+				}
+				else if (strncmp("c=", opt, strlen("c=")) == 0 ||
+						 strncmp("count=", opt, strlen("count=")) == 0)
+				{
+					if (have_iter)
+					{
+						pg_log_error("\\watch: iteration count is specified more than once");
+						success = false;
+					}
+					else
+					{
+						have_iter = true;
+						errno = 0;
+						iter = strtoint(valptr, &opt_end, 10);
+						if (iter <= 0 || *opt_end || errno == ERANGE)
+						{
+							pg_log_error("\\watch: incorrect iteration count \"%s\"", valptr);
+							success = false;
+						}
+					}
+				}
+				else
+				{
+					pg_log_error("\\watch: unrecognized parameter \"%s\"", opt);
+					success = false;
+				}
+			}
+			else
+			{
+				/* Unlabeled argument: take it as interval */
+				if (have_sleep)
+				{
+					pg_log_error("\\watch: interval value is specified more than once");
+					success = false;
+				}
+				else
+				{
+					have_sleep = true;
+					errno = 0;
+					sleep = strtod(opt, &opt_end);
+					if (sleep < 0 || *opt_end || errno == ERANGE)
+					{
+						pg_log_error("\\watch: incorrect interval value \"%s\"", opt);
+						success = false;
+					}
+				}
+			}
+
 			free(opt);
 		}
 
-		/* If query_buf is empty, recall and execute previous query */
-		(void) copy_previous_query(query_buf, previous_buf);
+		/* If we parsed arguments successfully, do the command */
+		if (success)
+		{
+			/* If query_buf is empty, recall and execute previous query */
+			(void) copy_previous_query(query_buf, previous_buf);
 
-		success = do_watch(query_buf, sleep);
+			success = do_watch(query_buf, sleep, iter);
+		}
 
 		/* Reset the query buffer as though for \r */
 		resetPQExpBuffer(query_buf);
@@ -5032,6 +5120,8 @@ do_shell(const char *command)
 	else
 		result = system(command);
 
+	SetShellResultVariables(result);
+
 	if (result == 127 || result == -1)
 	{
 		pg_log_error("\\!: failed");
@@ -5047,7 +5137,7 @@ do_shell(const char *command)
  * onto a bunch of exec_command's variables to silence stupider compilers.
  */
 static bool
-do_watch(PQExpBuffer query_buf, double sleep)
+do_watch(PQExpBuffer query_buf, double sleep, int iter)
 {
 	long		sleep_ms = (long) (sleep * 1000);
 	printQueryOpt myopt = pset.popt;
@@ -5180,8 +5270,15 @@ do_watch(PQExpBuffer query_buf, double sleep)
 		if (res <= 0)
 			break;
 
+		/* If we have iteration count, check that it's not exceeded yet */
+		if (iter && (--iter <= 0))
+			break;
+
 		if (pagerpipe && ferror(pagerpipe))
 			break;
+
+		if (sleep == 0)
+			continue;
 
 #ifdef WIN32
 

@@ -20,6 +20,7 @@ backend_sources += files(
 nodefunc_sources = files(
   'copyfuncs.c',
   'equalfuncs.c',
+  'queryjumblefuncs.c',
   'outfuncs.c',
   'readfuncs.c',
 )

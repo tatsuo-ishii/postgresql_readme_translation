@@ -2547,20 +2547,26 @@ check_object_ownership(Oid roleid, ObjectType objtype, ObjectAddress address,
 				if (!superuser_arg(roleid))
 					ereport(ERROR,
 							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-							 errmsg("must be superuser")));
+							 errmsg("permission denied"),
+							 errdetail("The current user must have the %s attribute.",
+									   "SUPERUSER")));
 			}
 			else
 			{
 				if (!has_createrole_privilege(roleid))
 					ereport(ERROR,
 							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-							 errmsg("must have CREATEROLE privilege")));
+							 errmsg("permission denied"),
+							 errdetail("The current user must have the %s attribute.",
+									   "CREATEROLE")));
 				if (!is_admin_of_role(roleid, address.objectId))
 					ereport(ERROR,
 							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-							 errmsg("must have admin option on role \"%s\"",
-									GetUserNameFromId(address.objectId,
-													  true))));
+							 errmsg("permission denied"),
+							 errdetail("The current user must have the %s option on role \"%s\".",
+									   "ADMIN",
+									   GetUserNameFromId(address.objectId,
+														 true))));
 			}
 			break;
 		case OBJECT_TSPARSER:
@@ -2597,7 +2603,6 @@ get_object_namespace(const ObjectAddress *address)
 {
 	int			cache;
 	HeapTuple	tuple;
-	bool		isnull;
 	Oid			oid;
 	const ObjectPropertyType *property;
 
@@ -2615,11 +2620,9 @@ get_object_namespace(const ObjectAddress *address)
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for cache %d oid %u",
 			 cache, address->objectId);
-	oid = DatumGetObjectId(SysCacheGetAttr(cache,
-										   tuple,
-										   property->attnum_namespace,
-										   &isnull));
-	Assert(!isnull);
+	oid = DatumGetObjectId(SysCacheGetAttrNotNull(cache,
+												  tuple,
+												  property->attnum_namespace));
 	ReleaseSysCache(tuple);
 
 	return oid;
@@ -3890,7 +3893,6 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 			{
 				HeapTuple	tup;
 				Datum		nameDatum;
-				bool		isNull;
 				char	   *parname;
 
 				tup = SearchSysCache1(PARAMETERACLOID,
@@ -3902,10 +3904,8 @@ getObjectDescription(const ObjectAddress *object, bool missing_ok)
 							 object->objectId);
 					break;
 				}
-				nameDatum = SysCacheGetAttr(PARAMETERACLOID, tup,
-											Anum_pg_parameter_acl_parname,
-											&isNull);
-				Assert(!isNull);
+				nameDatum = SysCacheGetAttrNotNull(PARAMETERACLOID, tup,
+												   Anum_pg_parameter_acl_parname);
 				parname = TextDatumGetCString(nameDatum);
 				appendStringInfo(&buffer, _("parameter %s"), parname);
 				ReleaseSysCache(tup);
@@ -5753,7 +5753,6 @@ getObjectIdentityParts(const ObjectAddress *object,
 			{
 				HeapTuple	tup;
 				Datum		nameDatum;
-				bool		isNull;
 				char	   *parname;
 
 				tup = SearchSysCache1(PARAMETERACLOID,
@@ -5765,10 +5764,8 @@ getObjectIdentityParts(const ObjectAddress *object,
 							 object->objectId);
 					break;
 				}
-				nameDatum = SysCacheGetAttr(PARAMETERACLOID, tup,
-											Anum_pg_parameter_acl_parname,
-											&isNull);
-				Assert(!isNull);
+				nameDatum = SysCacheGetAttrNotNull(PARAMETERACLOID, tup,
+												   Anum_pg_parameter_acl_parname);
 				parname = TextDatumGetCString(nameDatum);
 				appendStringInfoString(&buffer, parname);
 				if (objname)
@@ -5922,7 +5919,7 @@ getObjectIdentityParts(const ObjectAddress *object,
 				transformType = format_type_be_qualified(transform->trftype);
 				transformLang = get_language_name(transform->trflang, false);
 
-				appendStringInfo(&buffer, "for %s on language %s",
+				appendStringInfo(&buffer, "for %s language %s",
 								 transformType,
 								 transformLang);
 				if (objname)

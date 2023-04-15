@@ -509,7 +509,7 @@ statext_dependencies_deserialize(bytea *data)
 		return NULL;
 
 	if (VARSIZE_ANY_EXHDR(data) < SizeOfHeader)
-		elog(ERROR, "invalid MVDependencies size %zd (expected at least %zd)",
+		elog(ERROR, "invalid MVDependencies size %zu (expected at least %zu)",
 			 VARSIZE_ANY_EXHDR(data), SizeOfHeader);
 
 	/* read the MVDependencies header */
@@ -541,7 +541,7 @@ statext_dependencies_deserialize(bytea *data)
 	min_expected_size = SizeOfItem(dependencies->ndeps);
 
 	if (VARSIZE_ANY_EXHDR(data) < min_expected_size)
-		elog(ERROR, "invalid dependencies size %zd (expected at least %zd)",
+		elog(ERROR, "invalid dependencies size %zu (expected at least %zu)",
 			 VARSIZE_ANY_EXHDR(data), min_expected_size);
 
 	/* allocate space for the MCV items */
@@ -1163,13 +1163,12 @@ clauselist_apply_dependencies(PlannerInfo *root, List *clauses,
  *		Determines if the expression is compatible with functional dependencies
  *
  * Similar to dependency_is_compatible_clause, but doesn't enforce that the
- * expression is a simple Var. OTOH we check that there's at least one
- * statistics object matching the expression.
+ * expression is a simple Var.  On success, return the matching statistics
+ * expression into *expr.
  */
 static bool
 dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, Node **expr)
 {
-	List	   *vars;
 	ListCell   *lc,
 			   *lc2;
 	Node	   *clause_expr;
@@ -1316,29 +1315,8 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	if (IsA(clause_expr, RelabelType))
 		clause_expr = (Node *) ((RelabelType *) clause_expr)->arg;
 
-	vars = pull_var_clause(clause_expr, 0);
-
-	foreach(lc, vars)
-	{
-		Var		   *var = (Var *) lfirst(lc);
-
-		/* Ensure Var is from the correct relation */
-		if (var->varno != relid)
-			return false;
-
-		/* We also better ensure the Var is from the current level */
-		if (var->varlevelsup != 0)
-			return false;
-
-		/* Also ignore system attributes (we don't allow stats on those) */
-		if (!AttrNumberIsForUserDefinedAttr(var->varattno))
-			return false;
-	}
-
 	/*
-	 * Check if we actually have a matching statistics for the expression.
-	 *
-	 * XXX Maybe this is an overkill. We'll eliminate the expressions later.
+	 * Search for a matching statistics expression.
 	 */
 	foreach(lc, statlist)
 	{

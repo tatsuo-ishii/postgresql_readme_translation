@@ -134,7 +134,7 @@ ExecutorStart(QueryDesc *queryDesc, int eflags)
 	/*
 	 * In some cases (e.g. an EXECUTE statement) a query execution will skip
 	 * parse analysis, which means that the query_id won't be reported.  Note
-	 * that it's harmless to report the query_id multiple time, as the call
+	 * that it's harmless to report the query_id multiple times, as the call
 	 * will be ignored if the top level query_id has already been reported.
 	 */
 	pgstat_report_query_id(queryDesc->plannedstmt->queryId, false);
@@ -289,7 +289,8 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
  *		There is no return value, but output tuples (if any) are sent to
  *		the destination receiver specified in the QueryDesc; and the number
  *		of tuples processed at the top level can be found in
- *		estate->es_processed.
+ *		estate->es_processed.  The total number of tuples processed in all
+ *		the ExecutorRun calls can be found in estate->es_total_processed.
  *
  *		We provide a function hook variable that lets loadable plugins
  *		get control when ExecutorRun is called.  Such a plugin would
@@ -371,6 +372,12 @@ standard_ExecutorRun(QueryDesc *queryDesc,
 					dest,
 					execute_once);
 	}
+
+	/*
+	 * Update es_total_processed to keep track of the number of tuples
+	 * processed across multiple ExecutorRun() calls.
+	 */
+	estate->es_total_processed += estate->es_processed;
 
 	/*
 	 * shutdown tuple receiver, if we started it
@@ -807,15 +814,14 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 	int			i;
 
 	/*
-	 * Do permissions checks and save the list for later use.
+	 * Do permissions checks
 	 */
 	ExecCheckPermissions(rangeTable, plannedstmt->permInfos, true);
-	estate->es_rteperminfos = plannedstmt->permInfos;
 
 	/*
 	 * initialize the node's execution state
 	 */
-	ExecInitRangeTable(estate, rangeTable);
+	ExecInitRangeTable(estate, rangeTable, plannedstmt->permInfos);
 
 	estate->es_plannedstmt = plannedstmt;
 	estate->es_part_prune_infos = plannedstmt->partPruneInfos;
@@ -912,7 +918,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		 * prepared to handle REWIND efficiently; otherwise there is no need.
 		 */
 		sp_eflags = eflags
-			& (EXEC_FLAG_EXPLAIN_ONLY | EXEC_FLAG_WITH_NO_DATA);
+			& ~(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
 		if (bms_is_member(i, plannedstmt->rewindPlanIDs))
 			sp_eflags |= EXEC_FLAG_REWIND;
 
@@ -1233,7 +1239,8 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_FdwState = NULL;
 	resultRelInfo->ri_usesFdwDirectModify = false;
 	resultRelInfo->ri_ConstraintExprs = NULL;
-	resultRelInfo->ri_GeneratedExprs = NULL;
+	resultRelInfo->ri_GeneratedExprsI = NULL;
+	resultRelInfo->ri_GeneratedExprsU = NULL;
 	resultRelInfo->ri_projectReturning = NULL;
 	resultRelInfo->ri_onConflictArbiterIndexes = NIL;
 	resultRelInfo->ri_onConflict = NULL;
@@ -2805,11 +2812,12 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	rcestate->es_range_table = parentestate->es_range_table;
 	rcestate->es_range_table_size = parentestate->es_range_table_size;
 	rcestate->es_relations = parentestate->es_relations;
-	rcestate->es_queryEnv = parentestate->es_queryEnv;
 	rcestate->es_rowmarks = parentestate->es_rowmarks;
+	rcestate->es_rteperminfos = parentestate->es_rteperminfos;
 	rcestate->es_plannedstmt = parentestate->es_plannedstmt;
 	rcestate->es_junkFilter = parentestate->es_junkFilter;
 	rcestate->es_output_cid = parentestate->es_output_cid;
+	rcestate->es_queryEnv = parentestate->es_queryEnv;
 
 	/*
 	 * ResultRelInfos needed by subplans are initialized from scratch when the

@@ -24,6 +24,7 @@
 #include "access/xlogutils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "replication/slot.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/proc.h"
@@ -362,7 +363,7 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 									   bool report_waiting)
 {
 	TimestampTz waitStart = 0;
-	char	   *new_status = NULL;
+	bool		waiting = false;
 	bool		logged_recovery_conflict = false;
 
 	/* Fast exit, to avoid a kernel call if there's no work to be done. */
@@ -400,14 +401,14 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 					pg_usleep(5000L);
 			}
 
-			if (waitStart != 0 && (!logged_recovery_conflict || new_status == NULL))
+			if (waitStart != 0 && (!logged_recovery_conflict || !waiting))
 			{
 				TimestampTz now = 0;
 				bool		maybe_log_conflict;
 				bool		maybe_update_title;
 
 				maybe_log_conflict = (log_recovery_conflict_waits && !logged_recovery_conflict);
-				maybe_update_title = (update_process_title && new_status == NULL);
+				maybe_update_title = (update_process_title && !waiting);
 
 				/* Get the current timestamp if not report yet */
 				if (maybe_log_conflict || maybe_update_title)
@@ -420,15 +421,8 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 				if (maybe_update_title &&
 					TimestampDifferenceExceeds(waitStart, now, 500))
 				{
-					const char *old_status;
-					int			len;
-
-					old_status = get_ps_display(&len);
-					new_status = (char *) palloc(len + 8 + 1);
-					memcpy(new_status, old_status, len);
-					strcpy(new_status + len, " waiting");
-					set_ps_display(new_status);
-					new_status[len] = '\0'; /* truncate off " waiting" */
+					set_ps_display_suffix("waiting");
+					waiting = true;
 				}
 
 				/*
@@ -456,12 +450,10 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
 		LogRecoveryConflict(reason, waitStart, GetCurrentTimestamp(),
 							NULL, false);
 
-	/* Reset ps display if we changed it */
-	if (new_status)
-	{
-		set_ps_display(new_status);
-		pfree(new_status);
-	}
+	/* reset ps display to remove the suffix if we added one */
+	if (waiting)
+		set_ps_display_remove_suffix();
+
 }
 
 /*
@@ -475,6 +467,7 @@ ResolveRecoveryConflictWithVirtualXIDs(VirtualTransactionId *waitlist,
  */
 void
 ResolveRecoveryConflictWithSnapshot(TransactionId snapshotConflictHorizon,
+									bool isCatalogRel,
 									RelFileLocator locator)
 {
 	VirtualTransactionId *backends;
@@ -500,6 +493,16 @@ ResolveRecoveryConflictWithSnapshot(TransactionId snapshotConflictHorizon,
 										   PROCSIG_RECOVERY_CONFLICT_SNAPSHOT,
 										   WAIT_EVENT_RECOVERY_CONFLICT_SNAPSHOT,
 										   true);
+
+	/*
+	 * Note that WaitExceedsMaxStandbyDelay() is not taken into account here
+	 * (as opposed to ResolveRecoveryConflictWithVirtualXIDs() above). That
+	 * seems OK, given that this kind of conflict should not normally be
+	 * reached, e.g. due to using a physical replication slot.
+	 */
+	if (wal_level >= WAL_LEVEL_LOGICAL && isCatalogRel)
+		InvalidateObsoleteReplicationSlots(RS_INVAL_HORIZON, 0, locator.dbOid,
+										   snapshotConflictHorizon);
 }
 
 /*
@@ -508,6 +511,7 @@ ResolveRecoveryConflictWithSnapshot(TransactionId snapshotConflictHorizon,
  */
 void
 ResolveRecoveryConflictWithSnapshotFullXid(FullTransactionId snapshotConflictHorizon,
+										   bool isCatalogRel,
 										   RelFileLocator locator)
 {
 	/*
@@ -526,7 +530,9 @@ ResolveRecoveryConflictWithSnapshotFullXid(FullTransactionId snapshotConflictHor
 		TransactionId truncated;
 
 		truncated = XidFromFullTransactionId(snapshotConflictHorizon);
-		ResolveRecoveryConflictWithSnapshot(truncated, locator);
+		ResolveRecoveryConflictWithSnapshot(truncated,
+											isCatalogRel,
+											locator);
 	}
 }
 
@@ -1356,7 +1362,7 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 
 	if (CurrRunningXacts->subxid_overflow)
 		elog(trace_recovery(DEBUG2),
-			 "snapshot of %u running transactions overflowed (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
+			 "snapshot of %d running transactions overflowed (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
 			 CurrRunningXacts->xcnt,
 			 LSN_FORMAT_ARGS(recptr),
 			 CurrRunningXacts->oldestRunningXid,
@@ -1364,7 +1370,7 @@ LogCurrentRunningXacts(RunningTransactions CurrRunningXacts)
 			 CurrRunningXacts->nextXid);
 	else
 		elog(trace_recovery(DEBUG2),
-			 "snapshot of %u+%u running transaction ids (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
+			 "snapshot of %d+%d running transaction ids (lsn %X/%X oldest xid %u latest complete %u next xid %u)",
 			 CurrRunningXacts->xcnt, CurrRunningXacts->subxcnt,
 			 LSN_FORMAT_ARGS(recptr),
 			 CurrRunningXacts->oldestRunningXid,
@@ -1486,6 +1492,9 @@ get_recovery_conflict_desc(ProcSignalReason reason)
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_SNAPSHOT:
 			reasonDesc = _("recovery conflict on snapshot");
+			break;
+		case PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT:
+			reasonDesc = _("recovery conflict on replication slot");
 			break;
 		case PROCSIG_RECOVERY_CONFLICT_STARTUP_DEADLOCK:
 			reasonDesc = _("recovery conflict on buffer deadlock");

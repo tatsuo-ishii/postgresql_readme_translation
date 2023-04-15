@@ -707,6 +707,7 @@ do_analyze_rel(Relation onerel, VacuumParams *params,
 			IndexVacuumInfo ivinfo;
 
 			ivinfo.index = Irel[ind];
+			ivinfo.heaprel = onerel;
 			ivinfo.analyze_only = true;
 			ivinfo.estimated_count = true;
 			ivinfo.message_level = elevel;
@@ -1304,7 +1305,7 @@ acquire_sample_rows(Relation onerel, int elevel,
 	 * tuples are already sorted.
 	 */
 	if (numrows == targrows)
-		qsort_interruptible((void *) rows, numrows, sizeof(HeapTuple),
+		qsort_interruptible(rows, numrows, sizeof(HeapTuple),
 							compare_rows, NULL);
 
 	/*
@@ -1388,6 +1389,10 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 				i;
 	ListCell   *lc;
 	bool		has_child;
+
+	/* Initialize output parameters to zero now, in case we exit early */
+	*totalrows = 0;
+	*totaldeadrows = 0;
 
 	/*
 	 * Find all members of inheritance set.  We only need AccessShareLock on
@@ -1522,8 +1527,6 @@ acquire_inherited_sample_rows(Relation onerel, int elevel,
 	pgstat_progress_update_param(PROGRESS_ANALYZE_CHILD_TABLES_TOTAL,
 								 nrels);
 	numrows = 0;
-	*totalrows = 0;
-	*totaldeadrows = 0;
 	for (i = 0; i < nrels; i++)
 	{
 		Relation	childrel = rels[i];
@@ -2479,8 +2482,8 @@ compute_scalar_stats(VacAttrStatsP stats,
 		/* Sort the collected values */
 		cxt.ssup = &ssup;
 		cxt.tupnoLink = tupnoLink;
-		qsort_interruptible((void *) values, values_cnt, sizeof(ScalarItem),
-							compare_scalars, (void *) &cxt);
+		qsort_interruptible(values, values_cnt, sizeof(ScalarItem),
+							compare_scalars, &cxt);
 
 		/*
 		 * Now scan the values in order, find the most common ones, and also
@@ -2724,7 +2727,7 @@ compute_scalar_stats(VacAttrStatsP stats,
 						deltafrac;
 
 			/* Sort the MCV items into position order to speed next loop */
-			qsort_interruptible((void *) track, num_mcv, sizeof(ScalarMCVItem),
+			qsort_interruptible(track, num_mcv, sizeof(ScalarMCVItem),
 								compare_mcvs, NULL);
 
 			/*

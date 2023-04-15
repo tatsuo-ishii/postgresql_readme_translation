@@ -17,6 +17,8 @@ top_builddir = ../../..
 include $(top_builddir)/src/Makefile.global
 
 export GZIP_PROGRAM=$(GZIP)
+export LZ4
+export ZSTD
 export with_icu
 
 override CPPFLAGS := -I$(libpq_srcdir) $(CPPFLAGS)
@@ -24,7 +26,11 @@ LDFLAGS_INTERNAL += -L$(top_builddir)/src/fe_utils -lpgfeutils $(libpq_pgport)
 
 OBJS = \
 	$(WIN32RES) \
+	compress_gzip.o \
 	compress_io.o \
+	compress_lz4.o \
+	compress_none.o \
+	compress_zstd.o \
 	dumputils.o \
 	parallel.o \
 	pg_backup_archiver.o \

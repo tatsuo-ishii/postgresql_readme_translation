@@ -226,6 +226,19 @@ index_check_primary_key(Relation heapRel,
 	}
 
 	/*
+	 * Indexes created with NULLS NOT DISTINCT cannot be used for primary key
+	 * constraints. While there is no direct syntax to reach here, it can be
+	 * done by creating a separate index and attaching it via ALTER TABLE ..
+	 * USING INDEX.
+	 */
+	if (indexInfo->ii_NullsNotDistinct)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("primary keys cannot use NULLS NOT DISTINCT indexes")));
+	}
+
+	/*
 	 * Check that all of the attributes in a primary key are marked as not
 	 * null.  (We don't really expect to see that; it'd mean the parser messed
 	 * up.  But it seems wise to check anyway.)
@@ -1307,14 +1320,12 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 	indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(oldIndexId));
 	if (!HeapTupleIsValid(indexTuple))
 		elog(ERROR, "cache lookup failed for index %u", oldIndexId);
-	indclassDatum = SysCacheGetAttr(INDEXRELID, indexTuple,
-									Anum_pg_index_indclass, &isnull);
-	Assert(!isnull);
+	indclassDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+										   Anum_pg_index_indclass);
 	indclass = (oidvector *) DatumGetPointer(indclassDatum);
 
-	colOptionDatum = SysCacheGetAttr(INDEXRELID, indexTuple,
-									 Anum_pg_index_indoption, &isnull);
-	Assert(!isnull);
+	colOptionDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+											Anum_pg_index_indoption);
 	indcoloptions = (int2vector *) DatumGetPointer(colOptionDatum);
 
 	/* Fetch options of index if any */
@@ -1334,9 +1345,8 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 		Datum		exprDatum;
 		char	   *exprString;
 
-		exprDatum = SysCacheGetAttr(INDEXRELID, indexTuple,
-									Anum_pg_index_indexprs, &isnull);
-		Assert(!isnull);
+		exprDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+										   Anum_pg_index_indexprs);
 		exprString = TextDatumGetCString(exprDatum);
 		indexExprs = (List *) stringToNode(exprString);
 		pfree(exprString);
@@ -1346,9 +1356,8 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 		Datum		predDatum;
 		char	   *predString;
 
-		predDatum = SysCacheGetAttr(INDEXRELID, indexTuple,
-									Anum_pg_index_indpred, &isnull);
-		Assert(!isnull);
+		predDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+										   Anum_pg_index_indpred);
 		predString = TextDatumGetCString(predDatum);
 		indexPreds = (List *) stringToNode(predString);
 
@@ -1370,7 +1379,8 @@ index_concurrently_create_copy(Relation heapRelation, Oid oldIndexId,
 							oldInfo->ii_Unique,
 							oldInfo->ii_NullsNotDistinct,
 							false,	/* not ready for inserts */
-							true);
+							true,
+							indexRelation->rd_indam->amsummarizing);
 
 	/*
 	 * Extract the list of column names and the column numbers for the new
@@ -1799,7 +1809,7 @@ index_concurrently_swap(Oid newIndexId, Oid oldIndexId, const char *oldName)
 			memset(repl_repl, false, sizeof(repl_repl));
 
 			repl_repl[Anum_pg_attribute_attstattarget - 1] = true;
-			repl_val[Anum_pg_attribute_attstattarget - 1] = Int32GetDatum(attstattarget);
+			repl_val[Anum_pg_attribute_attstattarget - 1] = Int16GetDatum(attstattarget);
 
 			newTuple = heap_modify_tuple(attrTuple,
 										 RelationGetDescr(pg_attribute),
@@ -2442,7 +2452,8 @@ BuildIndexInfo(Relation index)
 					   indexStruct->indisunique,
 					   indexStruct->indnullsnotdistinct,
 					   indexStruct->indisready,
-					   false);
+					   false,
+					   index->rd_indam->amsummarizing);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -2502,7 +2513,8 @@ BuildDummyIndexInfo(Relation index)
 					   indexStruct->indisunique,
 					   indexStruct->indnullsnotdistinct,
 					   indexStruct->indisready,
-					   false);
+					   false,
+					   index->rd_indam->amsummarizing);
 
 	/* fill in attribute numbers */
 	for (i = 0; i < numAtts; i++)
@@ -3346,6 +3358,7 @@ validate_index(Oid heapId, Oid indexId, Snapshot snapshot)
 	 * Scan the index and gather up all the TIDs into a tuplesort object.
 	 */
 	ivinfo.index = indexRelation;
+	ivinfo.heaprel = heapRelation;
 	ivinfo.analyze_only = false;
 	ivinfo.report_progress = true;
 	ivinfo.estimated_count = true;
@@ -3482,9 +3495,8 @@ index_set_state_flags(Oid indexId, IndexStateFlagsAction action)
 			 * CONCURRENTLY that failed partway through.)
 			 *
 			 * Note: the CLUSTER logic assumes that indisclustered cannot be
-			 * set on any invalid index, so clear that flag too.  Similarly,
-			 * ALTER TABLE assumes that indisreplident cannot be set for
-			 * invalid indexes.
+			 * set on any invalid index, so clear that flag too.  For
+			 * cleanliness, also clear indisreplident.
 			 */
 			indexForm->indisvalid = false;
 			indexForm->indisclustered = false;

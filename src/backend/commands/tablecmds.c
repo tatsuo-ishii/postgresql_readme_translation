@@ -103,6 +103,7 @@
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
+#include "utils/usercontext.h"
 
 /*
  * ON COMMIT action list
@@ -1216,6 +1217,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 						InvalidOid,
 						RelationGetRelid(idxRel),
 						constraintOid,
+						-1,
 						false, false, false, false, false);
 
 			index_close(idxRel, AccessShareLock);
@@ -1761,7 +1763,7 @@ ExecuteTruncate(TruncateStmt *stmt)
 	}
 
 	ExecuteTruncateGuts(rels, relids, relids_logged,
-						stmt->behavior, stmt->restart_seqs);
+						stmt->behavior, stmt->restart_seqs, false);
 
 	/* And close the rels */
 	foreach(cell, rels)
@@ -1789,7 +1791,8 @@ void
 ExecuteTruncateGuts(List *explicit_rels,
 					List *relids,
 					List *relids_logged,
-					DropBehavior behavior, bool restart_seqs)
+					DropBehavior behavior, bool restart_seqs,
+					bool run_as_table_owner)
 {
 	List	   *rels;
 	List	   *seq_relids = NIL;
@@ -1928,7 +1931,14 @@ ExecuteTruncateGuts(List *explicit_rels,
 	resultRelInfo = resultRelInfos;
 	foreach(cell, rels)
 	{
+		UserContext	ucxt;
+
+		if (run_as_table_owner)
+			SwitchToUntrustedUser(resultRelInfo->ri_RelationDesc->rd_rel->relowner,
+								  &ucxt);
 		ExecBSTruncateTriggers(estate, resultRelInfo);
+		if (run_as_table_owner)
+			RestoreUserContext(&ucxt);
 		resultRelInfo++;
 	}
 
@@ -2133,7 +2143,14 @@ ExecuteTruncateGuts(List *explicit_rels,
 	resultRelInfo = resultRelInfos;
 	foreach(cell, rels)
 	{
+		UserContext	ucxt;
+
+		if (run_as_table_owner)
+			SwitchToUntrustedUser(resultRelInfo->ri_RelationDesc->rd_rel->relowner,
+								  &ucxt);
 		ExecASTruncateTriggers(estate, resultRelInfo);
+		if (run_as_table_owner)
+			RestoreUserContext(&ucxt);
 		resultRelInfo++;
 	}
 
@@ -2562,13 +2579,16 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 				Oid			defCollId;
 
 				/*
-				 * Yes, try to merge the two column definitions. They must
-				 * have the same type, typmod, and collation.
+				 * Yes, try to merge the two column definitions.
 				 */
 				ereport(NOTICE,
 						(errmsg("merging multiple inherited definitions of column \"%s\"",
 								attributeName)));
 				def = (ColumnDef *) list_nth(inhSchema, exist_attno - 1);
+
+				/*
+				 * Must have the same type and typmod
+				 */
 				typenameTypeIdAndMod(NULL, def->typeName, &defTypeId, &deftypmod);
 				if (defTypeId != attribute->atttypid ||
 					deftypmod != attribute->atttypmod)
@@ -2581,6 +2601,10 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 																deftypmod),
 									   format_type_with_typemod(attribute->atttypid,
 																attribute->atttypmod))));
+
+				/*
+				 * Must have the same collation
+				 */
 				defCollId = GetColumnDefCollation(NULL, def, defTypeId);
 				if (defCollId != attribute->attcollation)
 					ereport(ERROR,
@@ -2591,7 +2615,9 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 									   get_collation_name(defCollId),
 									   get_collation_name(attribute->attcollation))));
 
-				/* Copy/check storage parameter */
+				/*
+				 * Copy/check storage parameter
+				 */
 				if (def->storage == 0)
 					def->storage = attribute->attstorage;
 				else if (def->storage != attribute->attstorage)
@@ -2603,7 +2629,9 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 									   storage_name(def->storage),
 									   storage_name(attribute->attstorage))));
 
-				/* Copy/check compression parameter */
+				/*
+				 * Copy/check compression parameter
+				 */
 				if (CompressionMethodIsValid(attribute->attcompression))
 				{
 					const char *compression =
@@ -2619,18 +2647,31 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 								 errdetail("%s versus %s", def->compression, compression)));
 				}
 
-				def->inhcount++;
-				/* Merge of NOT NULL constraints = OR 'em together */
+				/*
+				 * Merge of NOT NULL constraints = OR 'em together
+				 */
 				def->is_not_null |= attribute->attnotnull;
-				/* Default and other constraints are handled below */
-				newattmap->attnums[parent_attno - 1] = exist_attno;
 
-				/* Check for GENERATED conflicts */
+				/*
+				 * Check for GENERATED conflicts
+				 */
 				if (def->generated != attribute->attgenerated)
 					ereport(ERROR,
 							(errcode(ERRCODE_DATATYPE_MISMATCH),
 							 errmsg("inherited column \"%s\" has a generation conflict",
 									attributeName)));
+
+				/*
+				 * Default and other constraints are handled below
+				 */
+
+				def->inhcount++;
+				if (def->inhcount < 0)
+					ereport(ERROR,
+							errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							errmsg("too many inheritance parents"));
+
+				newattmap->attnums[parent_attno - 1] = exist_attno;
 			}
 			else
 			{
@@ -2853,8 +2894,7 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 				Assert(!is_partition);
 
 				/*
-				 * Yes, try to merge the two column definitions. They must
-				 * have the same type, typmod, and collation.
+				 * Yes, try to merge the two column definitions.
 				 */
 				if (exist_attno == schema_attno)
 					ereport(NOTICE,
@@ -2865,6 +2905,10 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 							(errmsg("moving and merging column \"%s\" with inherited definition", attributeName),
 							 errdetail("User-specified column moved to the position of the inherited column.")));
 				def = (ColumnDef *) list_nth(inhSchema, exist_attno - 1);
+
+				/*
+				 * Must have the same type and typmod
+				 */
 				typenameTypeIdAndMod(NULL, def->typeName, &defTypeId, &deftypmod);
 				typenameTypeIdAndMod(NULL, newdef->typeName, &newTypeId, &newtypmod);
 				if (defTypeId != newTypeId || deftypmod != newtypmod)
@@ -2877,6 +2921,10 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 																deftypmod),
 									   format_type_with_typemod(newTypeId,
 																newtypmod))));
+
+				/*
+				 * Must have the same collation
+				 */
 				defcollid = GetColumnDefCollation(NULL, def, defTypeId);
 				newcollid = GetColumnDefCollation(NULL, newdef, newTypeId);
 				if (defcollid != newcollid)
@@ -2894,7 +2942,9 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 				 */
 				def->identity = newdef->identity;
 
-				/* Copy storage parameter */
+				/*
+				 * Copy storage parameter
+				 */
 				if (def->storage == 0)
 					def->storage = newdef->storage;
 				else if (newdef->storage != 0 && def->storage != newdef->storage)
@@ -2906,7 +2956,9 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 									   storage_name(def->storage),
 									   storage_name(newdef->storage))));
 
-				/* Copy compression parameter */
+				/*
+				 * Copy compression parameter
+				 */
 				if (def->compression == NULL)
 					def->compression = newdef->compression;
 				else if (newdef->compression != NULL)
@@ -2919,9 +2971,9 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 								 errdetail("%s versus %s", def->compression, newdef->compression)));
 				}
 
-				/* Mark the column as locally defined */
-				def->is_local = true;
-				/* Merge of NOT NULL constraints = OR 'em together */
+				/*
+				 * Merge of NOT NULL constraints = OR 'em together
+				 */
 				def->is_not_null |= newdef->is_not_null;
 
 				/*
@@ -2962,12 +3014,17 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 								 errhint("A child table column cannot be generated unless its parent column is.")));
 				}
 
-				/* If new def has a default, override previous default */
+				/*
+				 * If new def has a default, override previous default
+				 */
 				if (newdef->raw_default != NULL)
 				{
 					def->raw_default = newdef->raw_default;
 					def->cooked_default = newdef->cooked_default;
 				}
+
+				/* Mark the column as locally defined */
+				def->is_local = true;
 			}
 			else
 			{
@@ -3015,17 +3072,34 @@ MergeAttributes(List *schema, List *supers, char relpersistence,
 					coldef->is_not_null |= restdef->is_not_null;
 
 					/*
-					 * As above, reject generated columns in partitions that
-					 * are not generated in the parent.
+					 * Check for conflicts related to generated columns.
+					 *
+					 * Same rules as above: generated-ness has to match the
+					 * parent, but the contents of the generation expression
+					 * can be different.
 					 */
-					if (restdef->generated && !coldef->generated)
-						ereport(ERROR,
-								(errcode(ERRCODE_INVALID_COLUMN_DEFINITION),
-								 errmsg("child column \"%s\" specifies generation expression",
-										restdef->colname),
-								 errhint("A child table column cannot be generated unless its parent column is.")));
-					/* Other way around should have been dealt with above */
-					Assert(!(coldef->generated && !restdef->generated));
+					if (coldef->generated)
+					{
+						if (restdef->raw_default && !restdef->generated)
+							ereport(ERROR,
+									(errcode(ERRCODE_INVALID_COLUMN_DEFINITION),
+									 errmsg("column \"%s\" inherits from generated column but specifies default",
+											restdef->colname)));
+						if (restdef->identity)
+							ereport(ERROR,
+									(errcode(ERRCODE_INVALID_COLUMN_DEFINITION),
+									 errmsg("column \"%s\" inherits from generated column but specifies identity",
+											restdef->colname)));
+					}
+					else
+					{
+						if (restdef->generated)
+							ereport(ERROR,
+									(errcode(ERRCODE_INVALID_COLUMN_DEFINITION),
+									 errmsg("child column \"%s\" specifies generation expression",
+											restdef->colname),
+									 errhint("A child table column cannot be generated unless its parent column is.")));
+					}
 
 					/*
 					 * Override the parent's default value for this column
@@ -3119,6 +3193,10 @@ MergeCheckConstraint(List *constraints, char *name, Node *expr)
 		{
 			/* OK to merge */
 			ccon->inhcount++;
+			if (ccon->inhcount < 0)
+				ereport(ERROR,
+						errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						errmsg("too many inheritance parents"));
 			return true;
 		}
 
@@ -6454,6 +6532,7 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 	{
 		Form_pg_depend pg_depend = (Form_pg_depend) GETSTRUCT(depTup);
 		Relation	rel;
+		TupleDesc	tupleDesc;
 		Form_pg_attribute att;
 
 		/* Check for directly dependent types */
@@ -6470,18 +6549,57 @@ find_composite_type_dependencies(Oid typeOid, Relation origRelation,
 			continue;
 		}
 
-		/* Else, ignore dependees that aren't user columns of relations */
-		/* (we assume system columns are never of interesting types) */
-		if (pg_depend->classid != RelationRelationId ||
-			pg_depend->objsubid <= 0)
+		/* Else, ignore dependees that aren't relations */
+		if (pg_depend->classid != RelationRelationId)
 			continue;
 
 		rel = relation_open(pg_depend->objid, AccessShareLock);
-		att = TupleDescAttr(rel->rd_att, pg_depend->objsubid - 1);
+		tupleDesc = RelationGetDescr(rel);
 
-		if (rel->rd_rel->relkind == RELKIND_RELATION ||
-			rel->rd_rel->relkind == RELKIND_MATVIEW ||
-			rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		/*
+		 * If objsubid identifies a specific column, refer to that in error
+		 * messages.  Otherwise, search to see if there's a user column of the
+		 * type.  (We assume system columns are never of interesting types.)
+		 * The search is needed because an index containing an expression
+		 * column of the target type will just be recorded as a whole-relation
+		 * dependency.  If we do not find a column of the type, the dependency
+		 * must indicate that the type is transiently referenced in an index
+		 * expression but not stored on disk, which we assume is OK, just as
+		 * we do for references in views.  (It could also be that the target
+		 * type is embedded in some container type that is stored in an index
+		 * column, but the previous recursion should catch such cases.)
+		 */
+		if (pg_depend->objsubid > 0 && pg_depend->objsubid <= tupleDesc->natts)
+			att = TupleDescAttr(tupleDesc, pg_depend->objsubid - 1);
+		else
+		{
+			att = NULL;
+			for (int attno = 1; attno <= tupleDesc->natts; attno++)
+			{
+				att = TupleDescAttr(tupleDesc, attno - 1);
+				if (att->atttypid == typeOid && !att->attisdropped)
+					break;
+				att = NULL;
+			}
+			if (att == NULL)
+			{
+				/* No such column, so assume OK */
+				relation_close(rel, AccessShareLock);
+				continue;
+			}
+		}
+
+		/*
+		 * We definitely should reject if the relation has storage.  If it's
+		 * partitioned, then perhaps we don't have to reject: if there are
+		 * partitions then we'll fail when we find one, else there is no
+		 * stored data to worry about.  However, it's possible that the type
+		 * change would affect conclusions about whether the type is sortable
+		 * or hashable and thus (if it's a partitioning column) break the
+		 * partitioning rule.  For now, reject for partitioned rels too.
+		 */
+		if (RELKIND_HAS_STORAGE(rel->rd_rel->relkind) ||
+			RELKIND_HAS_PARTITIONS(rel->rd_rel->relkind))
 		{
 			if (origTypeName)
 				ereport(ERROR,
@@ -6734,6 +6852,10 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 
 			/* Bump the existing child att's inhcount */
 			childatt->attinhcount++;
+			if (childatt->attinhcount < 0)
+				ereport(ERROR,
+						errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						errmsg("too many inheritance parents"));
 			CatalogTupleUpdate(attrdesc, &tuple->t_self, tuple);
 
 			heap_freetuple(tuple);
@@ -6825,6 +6947,10 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	attribute.attstattarget = (newattnum > 0) ? -1 : 0;
 	attribute.attlen = tform->typlen;
 	attribute.attnum = newattnum;
+	if (list_length(colDef->typeName->arrayBounds) > PG_INT16_MAX)
+		ereport(ERROR,
+				errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				errmsg("too many array dimensions"));
 	attribute.attndims = list_length(colDef->typeName->arrayBounds);
 	attribute.atttypmod = typmod;
 	attribute.attbyval = tform->typbyval;
@@ -8587,6 +8713,7 @@ ATExecAddIndex(AlteredTableInfo *tab, Relation rel,
 						  InvalidOid,	/* no predefined OID */
 						  InvalidOid,	/* no parent index */
 						  InvalidOid,	/* no parent constraint */
+						  -1,	/* total_parts unknown */
 						  true, /* is_alter_table */
 						  check_rights,
 						  false,	/* check_not_in_use - we did it already */
@@ -11061,7 +11188,6 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 			List	   *children = NIL;
 			ListCell   *child;
 			NewConstraint *newcon;
-			bool		isnull;
 			Datum		val;
 			char	   *conbin;
 
@@ -11116,11 +11242,8 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
 			newcon->refindid = InvalidOid;
 			newcon->conid = con->oid;
 
-			val = SysCacheGetAttr(CONSTROID, tuple,
-								  Anum_pg_constraint_conbin, &isnull);
-			if (isnull)
-				elog(ERROR, "null conbin for constraint %u", con->oid);
-
+			val = SysCacheGetAttrNotNull(CONSTROID, tuple,
+										 Anum_pg_constraint_conbin);
 			conbin = TextDatumGetCString(val);
 			newcon->qual = (Node *) stringToNode(conbin);
 
@@ -11164,6 +11287,11 @@ ATExecValidateConstraint(List **wqueue, Relation rel, char *constrName,
  * transformColumnNameList - transform list of column names
  *
  * Lookup each name and return its attnum and, optionally, type OID
+ *
+ * Note: the name of this function suggests that it's general-purpose,
+ * but actually it's only used to look up names appearing in foreign-key
+ * clauses.  The error messages would need work to use it in other cases,
+ * and perhaps the validity checks as well.
  */
 static int
 transformColumnNameList(Oid relId, List *colList,
@@ -11177,6 +11305,7 @@ transformColumnNameList(Oid relId, List *colList,
 	{
 		char	   *attname = strVal(lfirst(l));
 		HeapTuple	atttuple;
+		Form_pg_attribute attform;
 
 		atttuple = SearchSysCacheAttName(relId, attname);
 		if (!HeapTupleIsValid(atttuple))
@@ -11184,14 +11313,19 @@ transformColumnNameList(Oid relId, List *colList,
 					(errcode(ERRCODE_UNDEFINED_COLUMN),
 					 errmsg("column \"%s\" referenced in foreign key constraint does not exist",
 							attname)));
+		attform = (Form_pg_attribute) GETSTRUCT(atttuple);
+		if (attform->attnum < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("system columns cannot be used in foreign keys")));
 		if (attnum >= INDEX_MAX_KEYS)
 			ereport(ERROR,
 					(errcode(ERRCODE_TOO_MANY_COLUMNS),
 					 errmsg("cannot have more than %d keys in a foreign key",
 							INDEX_MAX_KEYS)));
-		attnums[attnum] = ((Form_pg_attribute) GETSTRUCT(atttuple))->attnum;
+		attnums[attnum] = attform->attnum;
 		if (atttypids != NULL)
-			atttypids[attnum] = ((Form_pg_attribute) GETSTRUCT(atttuple))->atttypid;
+			atttypids[attnum] = attform->atttypid;
 		ReleaseSysCache(atttuple);
 		attnum++;
 	}
@@ -11222,7 +11356,6 @@ transformFkeyGetPrimaryKey(Relation pkrel, Oid *indexOid,
 	HeapTuple	indexTuple = NULL;
 	Form_pg_index indexStruct = NULL;
 	Datum		indclassDatum;
-	bool		isnull;
 	oidvector  *indclass;
 	int			i;
 
@@ -11274,9 +11407,8 @@ transformFkeyGetPrimaryKey(Relation pkrel, Oid *indexOid,
 						RelationGetRelationName(pkrel))));
 
 	/* Must get indclass the hard way */
-	indclassDatum = SysCacheGetAttr(INDEXRELID, indexTuple,
-									Anum_pg_index_indclass, &isnull);
-	Assert(!isnull);
+	indclassDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+										   Anum_pg_index_indclass);
 	indclass = (oidvector *) DatumGetPointer(indclassDatum);
 
 	/*
@@ -11369,13 +11501,11 @@ transformFkeyCheckAttrs(Relation pkrel,
 			heap_attisnull(indexTuple, Anum_pg_index_indexprs, NULL))
 		{
 			Datum		indclassDatum;
-			bool		isnull;
 			oidvector  *indclass;
 
 			/* Must get indclass the hard way */
-			indclassDatum = SysCacheGetAttr(INDEXRELID, indexTuple,
-											Anum_pg_index_indclass, &isnull);
-			Assert(!isnull);
+			indclassDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
+												   Anum_pg_index_indclass);
 			indclass = (oidvector *) DatumGetPointer(indclassDatum);
 
 			/*
@@ -12837,6 +12967,10 @@ ATExecAlterColumnType(AlteredTableInfo *tab, Relation rel,
 	attTup->atttypid = targettype;
 	attTup->atttypmod = targettypmod;
 	attTup->attcollation = targetcollid;
+	if (list_length(typeName->arrayBounds) > PG_INT16_MAX)
+		ereport(ERROR,
+				errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				errmsg("too many array dimensions"));
 	attTup->attndims = list_length(typeName->arrayBounds);
 	attTup->attlen = tform->typlen;
 	attTup->attbyval = tform->typbyval;
@@ -13527,7 +13661,6 @@ TryReuseForeignKey(Oid oldId, Constraint *con)
 {
 	HeapTuple	tup;
 	Datum		adatum;
-	bool		isNull;
 	ArrayType  *arr;
 	Oid		   *rawarr;
 	int			numkeys;
@@ -13540,10 +13673,8 @@ TryReuseForeignKey(Oid oldId, Constraint *con)
 	if (!HeapTupleIsValid(tup)) /* should not happen */
 		elog(ERROR, "cache lookup failed for constraint %u", oldId);
 
-	adatum = SysCacheGetAttr(CONSTROID, tup,
-							 Anum_pg_constraint_conpfeqop, &isNull);
-	if (isNull)
-		elog(ERROR, "null conpfeqop for constraint %u", oldId);
+	adatum = SysCacheGetAttrNotNull(CONSTROID, tup,
+									Anum_pg_constraint_conpfeqop);
 	arr = DatumGetArrayTypeP(adatum);	/* ensure not toasted */
 	numkeys = ARR_DIMS(arr)[0];
 	/* test follows the one in ri_FetchConstraintInfo() */
@@ -14709,7 +14840,8 @@ ATExecEnableDisableTrigger(Relation rel, const char *trigname,
 						   char fires_when, bool skip_system, bool recurse,
 						   LOCKMODE lockmode)
 {
-	EnableDisableTrigger(rel, trigname, fires_when, skip_system, recurse,
+	EnableDisableTrigger(rel, trigname, InvalidOid,
+						 fires_when, skip_system, recurse,
 						 lockmode);
 }
 
@@ -15070,6 +15202,10 @@ MergeAttributesIntoExisting(Relation child_rel, Relation parent_rel)
 			 * later on, this change will just roll back.)
 			 */
 			childatt->attinhcount++;
+			if (childatt->attinhcount < 0)
+				ereport(ERROR,
+						errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						errmsg("too many inheritance parents"));
 
 			/*
 			 * In case of partitions, we must enforce that value of attislocal
@@ -15207,6 +15343,10 @@ MergeConstraintsIntoExisting(Relation child_rel, Relation parent_rel)
 			child_copy = heap_copytuple(child_tuple);
 			child_con = (Form_pg_constraint) GETSTRUCT(child_copy);
 			child_con->coninhcount++;
+			if (child_con->coninhcount < 0)
+				ereport(ERROR,
+						errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						errmsg("too many inheritance parents"));
 
 			/*
 			 * In case of partitions, an inherited constraint must be
@@ -15773,7 +15913,10 @@ ATExecDropOf(Relation rel, LOCKMODE lockmode)
  * relation_mark_replica_identity: Update a table's replica identity
  *
  * Iff ri_type = REPLICA_IDENTITY_INDEX, indexOid must be the Oid of a suitable
- * index. Otherwise, it should be InvalidOid.
+ * index. Otherwise, it must be InvalidOid.
+ *
+ * Caller had better hold an exclusive lock on the relation, as the results
+ * of running two of these concurrently wouldn't be pretty.
  */
 static void
 relation_mark_replica_identity(Relation rel, char ri_type, Oid indexOid,
@@ -15785,7 +15928,6 @@ relation_mark_replica_identity(Relation rel, char ri_type, Oid indexOid,
 	HeapTuple	pg_index_tuple;
 	Form_pg_class pg_class_form;
 	Form_pg_index pg_index_form;
-
 	ListCell   *index;
 
 	/*
@@ -15807,29 +15949,7 @@ relation_mark_replica_identity(Relation rel, char ri_type, Oid indexOid,
 	heap_freetuple(pg_class_tuple);
 
 	/*
-	 * Check whether the correct index is marked indisreplident; if so, we're
-	 * done.
-	 */
-	if (OidIsValid(indexOid))
-	{
-		Assert(ri_type == REPLICA_IDENTITY_INDEX);
-
-		pg_index_tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(indexOid));
-		if (!HeapTupleIsValid(pg_index_tuple))
-			elog(ERROR, "cache lookup failed for index %u", indexOid);
-		pg_index_form = (Form_pg_index) GETSTRUCT(pg_index_tuple);
-
-		if (pg_index_form->indisreplident)
-		{
-			ReleaseSysCache(pg_index_tuple);
-			return;
-		}
-		ReleaseSysCache(pg_index_tuple);
-	}
-
-	/*
-	 * Clear the indisreplident flag from any index that had it previously,
-	 * and set it for any index that should have it now.
+	 * Update the per-index indisreplident flags correctly.
 	 */
 	pg_index = table_open(IndexRelationId, RowExclusiveLock);
 	foreach(index, RelationGetIndexList(rel))
@@ -15843,19 +15963,23 @@ relation_mark_replica_identity(Relation rel, char ri_type, Oid indexOid,
 			elog(ERROR, "cache lookup failed for index %u", thisIndexOid);
 		pg_index_form = (Form_pg_index) GETSTRUCT(pg_index_tuple);
 
-		/*
-		 * Unset the bit if set.  We know it's wrong because we checked this
-		 * earlier.
-		 */
-		if (pg_index_form->indisreplident)
+		if (thisIndexOid == indexOid)
 		{
-			dirty = true;
-			pg_index_form->indisreplident = false;
+			/* Set the bit if not already set. */
+			if (!pg_index_form->indisreplident)
+			{
+				dirty = true;
+				pg_index_form->indisreplident = true;
+			}
 		}
-		else if (thisIndexOid == indexOid)
+		else
 		{
-			dirty = true;
-			pg_index_form->indisreplident = true;
+			/* Unset the bit if set. */
+			if (pg_index_form->indisreplident)
+			{
+				dirty = true;
+				pg_index_form->indisreplident = false;
+			}
 		}
 
 		if (dirty)
@@ -15867,7 +15991,9 @@ relation_mark_replica_identity(Relation rel, char ri_type, Oid indexOid,
 			/*
 			 * Invalidate the relcache for the table, so that after we commit
 			 * all sessions will refresh the table's replica identity index
-			 * before attempting any UPDATE or DELETE on the table.
+			 * before attempting any UPDATE or DELETE on the table.  (If we
+			 * changed the table's pg_class row above, then a relcache inval
+			 * is already queued due to that; but we might not have.)
 			 */
 			CacheInvalidateRelcache(rel);
 		}
@@ -15951,12 +16077,6 @@ ATExecReplicaIdentity(Relation rel, ReplicaIdentityStmt *stmt, LOCKMODE lockmode
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot use partial index \"%s\" as replica identity",
-						RelationGetRelationName(indexRel))));
-	/* And neither are invalid indexes. */
-	if (!indexRel->rd_index->indisvalid)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot use invalid index \"%s\" as replica identity",
 						RelationGetRelationName(indexRel))));
 
 	/* Check index for nullable columns. */
@@ -18072,6 +18192,7 @@ AttachPartitionEnsureIndexes(Relation rel, Relation attachrel)
 			DefineIndex(RelationGetRelid(attachrel), stmt, InvalidOid,
 						RelationGetRelid(idxRel),
 						conOid,
+						-1,
 						true, false, false, false, false);
 		}
 

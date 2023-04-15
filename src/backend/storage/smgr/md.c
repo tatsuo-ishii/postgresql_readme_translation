@@ -142,6 +142,16 @@ static MdfdVec *_mdfd_getseg(SMgrRelation reln, ForkNumber forknum,
 static BlockNumber _mdnblocks(SMgrRelation reln, ForkNumber forknum,
 							  MdfdVec *seg);
 
+static inline int
+_mdfd_open_flags(void)
+{
+	int			flags = O_RDWR | PG_BINARY;
+
+	if (io_direct_flags & IO_DIRECT_DATA)
+		flags |= PG_O_DIRECT;
+
+	return flags;
+}
 
 /*
  *	mdinit() -- Initialize private state for magnetic disk storage manager.
@@ -205,14 +215,14 @@ mdcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
 
 	path = relpath(reln->smgr_rlocator, forknum);
 
-	fd = PathNameOpenFile(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	fd = PathNameOpenFile(path, _mdfd_open_flags() | O_CREAT | O_EXCL);
 
 	if (fd < 0)
 	{
 		int			save_errno = errno;
 
 		if (isRedo)
-			fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+			fd = PathNameOpenFile(path, _mdfd_open_flags());
 		if (fd < 0)
 		{
 			/* be sure to report the error reported by create, not open */
@@ -447,11 +457,15 @@ mdunlinkfork(RelFileLocatorBackend rlocator, ForkNumber forknum, bool isRedo)
  */
 void
 mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-		 char *buffer, bool skipFsync)
+		 const void *buffer, bool skipFsync)
 {
 	off_t		seekpos;
 	int			nbytes;
 	MdfdVec    *v;
+
+	/* If this build supports direct I/O, the buffer must be I/O aligned. */
+	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= BLCKSZ)
+		Assert((uintptr_t) buffer == TYPEALIGN(PG_IO_ALIGN_SIZE, buffer));
 
 	/* This assert is too expensive to have on normally ... */
 #ifdef CHECK_WRITE_VS_EXTEND
@@ -501,6 +515,114 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 }
 
 /*
+ *	mdzeroextend() -- Add new zeroed out blocks to the specified relation.
+ *
+ *		Similar to mdextend(), except the relation can be extended by multiple
+ *		blocks at once and the added blocks will be filled with zeroes.
+ */
+void
+mdzeroextend(SMgrRelation reln, ForkNumber forknum,
+			 BlockNumber blocknum, int nblocks, bool skipFsync)
+{
+	MdfdVec    *v;
+	BlockNumber curblocknum = blocknum;
+	int			remblocks = nblocks;
+
+	Assert(nblocks > 0);
+
+	/* This assert is too expensive to have on normally ... */
+#ifdef CHECK_WRITE_VS_EXTEND
+	Assert(blocknum >= mdnblocks(reln, forknum));
+#endif
+
+	/*
+	 * If a relation manages to grow to 2^32-1 blocks, refuse to extend it any
+	 * more --- we mustn't create a block whose number actually is
+	 * InvalidBlockNumber or larger.
+	 */
+	if ((uint64) blocknum + nblocks >= (uint64) InvalidBlockNumber)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("cannot extend file \"%s\" beyond %u blocks",
+						relpath(reln->smgr_rlocator, forknum),
+						InvalidBlockNumber)));
+
+	while (remblocks > 0)
+	{
+		BlockNumber	segstartblock = curblocknum % ((BlockNumber) RELSEG_SIZE);
+		off_t		seekpos = (off_t) BLCKSZ * segstartblock;
+		int			numblocks;
+
+		if (segstartblock + remblocks > RELSEG_SIZE)
+			numblocks = RELSEG_SIZE - segstartblock;
+		else
+			numblocks = remblocks;
+
+		v = _mdfd_getseg(reln, forknum, curblocknum, skipFsync, EXTENSION_CREATE);
+
+		Assert(segstartblock < RELSEG_SIZE);
+		Assert(segstartblock + numblocks <= RELSEG_SIZE);
+
+		/*
+		 * If available and useful, use posix_fallocate() (via FileAllocate())
+		 * to extend the relation. That's often more efficient than using
+		 * write(), as it commonly won't cause the kernel to allocate page
+		 * cache space for the extended pages.
+		 *
+		 * However, we don't use FileAllocate() for small extensions, as it
+		 * defeats delayed allocation on some filesystems. Not clear where
+		 * that decision should be made though? For now just use a cutoff of
+		 * 8, anything between 4 and 8 worked OK in some local testing.
+		 */
+		if (numblocks > 8)
+		{
+			int			ret;
+
+			ret = FileFallocate(v->mdfd_vfd,
+								seekpos, (off_t) BLCKSZ * numblocks,
+								WAIT_EVENT_DATA_FILE_EXTEND);
+			if (ret != 0)
+			{
+				ereport(ERROR,
+						errcode_for_file_access(),
+						errmsg("could not extend file \"%s\" with FileFallocate(): %m",
+							   FilePathName(v->mdfd_vfd)),
+						errhint("Check free disk space."));
+			}
+		}
+		else
+		{
+			int			ret;
+
+			/*
+			 * Even if we don't want to use fallocate, we can still extend a
+			 * bit more efficiently than writing each 8kB block individually.
+			 * pg_pwrite_zeroes() (via FileZero()) uses
+			 * pg_pwritev_with_retry() to avoid multiple writes or needing a
+			 * zeroed buffer for the whole length of the extension.
+			 */
+			ret = FileZero(v->mdfd_vfd,
+						   seekpos, (off_t) BLCKSZ * numblocks,
+						   WAIT_EVENT_DATA_FILE_EXTEND);
+			if (ret < 0)
+				ereport(ERROR,
+						errcode_for_file_access(),
+						errmsg("could not extend file \"%s\": %m",
+							   FilePathName(v->mdfd_vfd)),
+						errhint("Check free disk space."));
+		}
+
+		if (!skipFsync && !SmgrIsTemp(reln))
+			register_dirty_segment(reln, forknum, v);
+
+		Assert(_mdnblocks(reln, forknum, v) <= ((BlockNumber) RELSEG_SIZE));
+
+		remblocks -= numblocks;
+		curblocknum += numblocks;
+	}
+}
+
+/*
  *	mdopenfork() -- Open one fork of the specified relation.
  *
  * Note we only open the first segment, when there are multiple segments.
@@ -523,7 +645,7 @@ mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior)
 
 	path = relpath(reln->smgr_rlocator, forknum);
 
-	fd = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+	fd = PathNameOpenFile(path, _mdfd_open_flags());
 
 	if (fd < 0)
 	{
@@ -594,6 +716,8 @@ mdprefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 	off_t		seekpos;
 	MdfdVec    *v;
 
+	Assert((io_direct_flags & IO_DIRECT_DATA) == 0);
+
 	v = _mdfd_getseg(reln, forknum, blocknum, false,
 					 InRecovery ? EXTENSION_RETURN_NULL : EXTENSION_FAIL);
 	if (v == NULL)
@@ -619,6 +743,8 @@ void
 mdwriteback(SMgrRelation reln, ForkNumber forknum,
 			BlockNumber blocknum, BlockNumber nblocks)
 {
+	Assert((io_direct_flags & IO_DIRECT_DATA) == 0);
+
 	/*
 	 * Issue flush requests in as few requests as possible; have to split at
 	 * segment boundaries though, since those are actually separate files.
@@ -669,11 +795,15 @@ mdwriteback(SMgrRelation reln, ForkNumber forknum,
  */
 void
 mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-	   char *buffer)
+	   void *buffer)
 {
 	off_t		seekpos;
 	int			nbytes;
 	MdfdVec    *v;
+
+	/* If this build supports direct I/O, the buffer must be I/O aligned. */
+	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= BLCKSZ)
+		Assert((uintptr_t) buffer == TYPEALIGN(PG_IO_ALIGN_SIZE, buffer));
 
 	TRACE_POSTGRESQL_SMGR_MD_READ_START(forknum, blocknum,
 										reln->smgr_rlocator.locator.spcOid,
@@ -734,11 +864,15 @@ mdread(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
  */
 void
 mdwrite(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-		char *buffer, bool skipFsync)
+		const void *buffer, bool skipFsync)
 {
 	off_t		seekpos;
 	int			nbytes;
 	MdfdVec    *v;
+
+	/* If this build supports direct I/O, the buffer must be I/O aligned. */
+	if (PG_O_DIRECT != 0 && PG_IO_ALIGN_SIZE <= BLCKSZ)
+		Assert((uintptr_t) buffer == TYPEALIGN(PG_IO_ALIGN_SIZE, buffer));
 
 	/* This assert is too expensive to have on normally ... */
 #ifdef CHECK_WRITE_VS_EXTEND
@@ -983,6 +1117,15 @@ mdimmedsync(SMgrRelation reln, ForkNumber forknum)
 	{
 		MdfdVec    *v = &reln->md_seg_fds[forknum][segno - 1];
 
+		/*
+		 * fsyncs done through mdimmedsync() should be tracked in a separate
+		 * IOContext than those done through mdsyncfiletag() to differentiate
+		 * between unavoidable client backend fsyncs (e.g. those done during
+		 * index build) and those which ideally would have been done by the
+		 * checkpointer. Since other IO operations bypassing the buffer
+		 * manager could also be tracked in such an IOContext, wait until
+		 * these are also tracked to track immediate fsyncs.
+		 */
 		if (FileSync(v->mdfd_vfd, WAIT_EVENT_DATA_FILE_IMMEDIATE_SYNC) < 0)
 			ereport(data_sync_elevel(ERROR),
 					(errcode_for_file_access(),
@@ -1021,14 +1164,32 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 
 	if (!RegisterSyncRequest(&tag, SYNC_REQUEST, false /* retryOnError */ ))
 	{
+		instr_time	io_start;
+
 		ereport(DEBUG1,
 				(errmsg_internal("could not forward fsync request because request queue is full")));
+
+		io_start = pgstat_prepare_io_time();
 
 		if (FileSync(seg->mdfd_vfd, WAIT_EVENT_DATA_FILE_SYNC) < 0)
 			ereport(data_sync_elevel(ERROR),
 					(errcode_for_file_access(),
 					 errmsg("could not fsync file \"%s\": %m",
 							FilePathName(seg->mdfd_vfd))));
+
+		/*
+		 * We have no way of knowing if the current IOContext is
+		 * IOCONTEXT_NORMAL or IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] at this
+		 * point, so count the fsync as being in the IOCONTEXT_NORMAL
+		 * IOContext. This is probably okay, because the number of backend
+		 * fsyncs doesn't say anything about the efficacy of the
+		 * BufferAccessStrategy. And counting both fsyncs done in
+		 * IOCONTEXT_NORMAL and IOCONTEXT_[BULKREAD, BULKWRITE, VACUUM] under
+		 * IOCONTEXT_NORMAL is likely clearer when investigating the number of
+		 * backend fsyncs.
+		 */
+		pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL,
+								IOOP_FSYNC, io_start, 1);
 	}
 }
 
@@ -1188,7 +1349,7 @@ _mdfd_openseg(SMgrRelation reln, ForkNumber forknum, BlockNumber segno,
 	fullpath = _mdfd_segpath(reln, forknum, segno);
 
 	/* open the file */
-	fd = PathNameOpenFile(fullpath, O_RDWR | PG_BINARY | oflags);
+	fd = PathNameOpenFile(fullpath, _mdfd_open_flags() | oflags);
 
 	pfree(fullpath);
 
@@ -1294,7 +1455,8 @@ _mdfd_getseg(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 */
 			if (nblocks < ((BlockNumber) RELSEG_SIZE))
 			{
-				char	   *zerobuf = palloc0(BLCKSZ);
+				char	   *zerobuf = palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE,
+													 MCXT_ALLOC_ZERO);
 
 				mdextend(reln, forknum,
 						 nextsegno * ((BlockNumber) RELSEG_SIZE) - 1,
@@ -1378,6 +1540,7 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 {
 	SMgrRelation reln = smgropen(ftag->rlocator, InvalidBackendId);
 	File		file;
+	instr_time	io_start;
 	bool		need_to_close;
 	int			result,
 				save_errno;
@@ -1397,11 +1560,13 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 		strlcpy(path, p, MAXPGPATH);
 		pfree(p);
 
-		file = PathNameOpenFile(path, O_RDWR | PG_BINARY);
+		file = PathNameOpenFile(path, _mdfd_open_flags());
 		if (file < 0)
 			return -1;
 		need_to_close = true;
 	}
+
+	io_start = pgstat_prepare_io_time();
 
 	/* Sync the file. */
 	result = FileSync(file, WAIT_EVENT_DATA_FILE_SYNC);
@@ -1409,6 +1574,9 @@ mdsyncfiletag(const FileTag *ftag, char *path)
 
 	if (need_to_close)
 		FileClose(file);
+
+	pgstat_count_io_op_time(IOOBJECT_RELATION, IOCONTEXT_NORMAL,
+							IOOP_FSYNC, io_start, 1);
 
 	errno = save_errno;
 	return result;

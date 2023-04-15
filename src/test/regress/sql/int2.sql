@@ -21,12 +21,12 @@ SELECT * FROM INT2_TBL;
 SELECT pg_input_is_valid('34', 'int2');
 SELECT pg_input_is_valid('asdf', 'int2');
 SELECT pg_input_is_valid('50000', 'int2');
-SELECT pg_input_error_message('50000', 'int2');
+SELECT * FROM pg_input_error_info('50000', 'int2');
 
 -- While we're here, check int2vector as well
 SELECT pg_input_is_valid(' 1 3  5 ', 'int2vector');
-SELECT pg_input_error_message('1 asdf', 'int2vector');
-SELECT pg_input_error_message('50000', 'int2vector');
+SELECT * FROM pg_input_error_info('1 asdf', 'int2vector');
+SELECT * FROM pg_input_error_info('50000', 'int2vector');
 
 SELECT * FROM INT2_TBL AS f(a, b);
 
@@ -141,3 +141,17 @@ SELECT int2 '-0o100000';
 SELECT int2 '-0o100001';
 SELECT int2 '-0x8000';
 SELECT int2 '-0x8001';
+
+
+-- underscores
+
+SELECT int2 '1_000';
+SELECT int2 '1_2_3';
+SELECT int2 '0xE_FF';
+SELECT int2 '0o2_73';
+SELECT int2 '0b_10_0101';
+
+-- error cases
+SELECT int2 '_100';
+SELECT int2 '100_';
+SELECT int2 '10__000';

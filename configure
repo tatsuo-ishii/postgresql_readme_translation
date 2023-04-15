@@ -12973,13 +12973,15 @@ else
 fi
 
   fi
-  # Function introduced in OpenSSL 1.0.2.
-  for ac_func in X509_get_signature_nid
+  # Functions introduced in OpenSSL 1.0.2. LibreSSL does not have
+  # SSL_CTX_set_cert_cb().
+  for ac_func in X509_get_signature_nid SSL_CTX_set_cert_cb
 do :
-  ac_fn_c_check_func "$LINENO" "X509_get_signature_nid" "ac_cv_func_X509_get_signature_nid"
-if test "x$ac_cv_func_X509_get_signature_nid" = xyes; then :
+  as_ac_var=`$as_echo "ac_cv_func_$ac_func" | $as_tr_sh`
+ac_fn_c_check_func "$LINENO" "$ac_func" "$as_ac_var"
+if eval test \"x\$"$as_ac_var"\" = x"yes"; then :
   cat >>confdefs.h <<_ACEOF
-#define HAVE_X509_GET_SIGNATURE_NID 1
+#define `$as_echo "HAVE_$ac_func" | $as_tr_cpp` 1
 _ACEOF
 
 fi
@@ -13011,6 +13013,18 @@ do :
 if test "x$ac_cv_func_CRYPTO_lock" = xyes; then :
   cat >>confdefs.h <<_ACEOF
 #define HAVE_CRYPTO_LOCK 1
+_ACEOF
+
+fi
+done
+
+  # Function introduced in OpenSSL 1.1.1.
+  for ac_func in X509_get_signature_info
+do :
+  ac_fn_c_check_func "$LINENO" "X509_get_signature_info" "ac_cv_func_X509_get_signature_info"
+if test "x$ac_cv_func_X509_get_signature_info" = xyes; then :
+  cat >>confdefs.h <<_ACEOF
+#define HAVE_X509_GET_SIGNATURE_INFO 1
 _ACEOF
 
 fi
@@ -14084,6 +14098,33 @@ _ACEOF
 
 else
   as_fn_error $? "gssapi.h header file is required for GSSAPI" "$LINENO" 5
+fi
+
+done
+
+fi
+
+done
+
+  for ac_header in gssapi/gssapi_ext.h
+do :
+  ac_fn_c_check_header_mongrel "$LINENO" "gssapi/gssapi_ext.h" "ac_cv_header_gssapi_gssapi_ext_h" "$ac_includes_default"
+if test "x$ac_cv_header_gssapi_gssapi_ext_h" = xyes; then :
+  cat >>confdefs.h <<_ACEOF
+#define HAVE_GSSAPI_GSSAPI_EXT_H 1
+_ACEOF
+
+else
+  for ac_header in gssapi_ext.h
+do :
+  ac_fn_c_check_header_mongrel "$LINENO" "gssapi_ext.h" "ac_cv_header_gssapi_ext_h" "$ac_includes_default"
+if test "x$ac_cv_header_gssapi_ext_h" = xyes; then :
+  cat >>confdefs.h <<_ACEOF
+#define HAVE_GSSAPI_EXT_H 1
+_ACEOF
+
+else
+  as_fn_error $? "gssapi_ext.h header file is required for GSSAPI" "$LINENO" 5
 fi
 
 done
@@ -15169,22 +15210,6 @@ cat >>confdefs.h <<_ACEOF
 _ACEOF
 
 
-ac_fn_c_check_type "$LINENO" "struct cmsgcred" "ac_cv_type_struct_cmsgcred" "#include <sys/socket.h>
-#include <sys/param.h>
-#ifdef HAVE_SYS_UCRED_H
-#include <sys/ucred.h>
-#endif
-"
-if test "x$ac_cv_type_struct_cmsgcred" = xyes; then :
-
-cat >>confdefs.h <<_ACEOF
-#define HAVE_STRUCT_CMSGCRED 1
-_ACEOF
-
-
-fi
-
-
 ac_fn_c_check_type "$LINENO" "struct option" "ac_cv_type_struct_option" "#ifdef HAVE_GETOPT_H
 #include <getopt.h>
 #endif
@@ -16266,41 +16291,6 @@ cat >>confdefs.h <<_ACEOF
 _ACEOF
 
 
-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for PS_STRINGS" >&5
-$as_echo_n "checking for PS_STRINGS... " >&6; }
-if ${pgac_cv_var_PS_STRINGS+:} false; then :
-  $as_echo_n "(cached) " >&6
-else
-  cat confdefs.h - <<_ACEOF >conftest.$ac_ext
-/* end confdefs.h.  */
-#include <machine/vmparam.h>
-#include <sys/exec.h>
-
-int
-main ()
-{
-PS_STRINGS->ps_nargvstr = 1;
-PS_STRINGS->ps_argvstr = "foo";
-  ;
-  return 0;
-}
-_ACEOF
-if ac_fn_c_try_link "$LINENO"; then :
-  pgac_cv_var_PS_STRINGS=yes
-else
-  pgac_cv_var_PS_STRINGS=no
-fi
-rm -f core conftest.err conftest.$ac_objext \
-    conftest$ac_exeext conftest.$ac_ext
-fi
-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $pgac_cv_var_PS_STRINGS" >&5
-$as_echo "$pgac_cv_var_PS_STRINGS" >&6; }
-if test "$pgac_cv_var_PS_STRINGS" = yes ; then
-
-$as_echo "#define HAVE_PS_STRINGS 1" >>confdefs.h
-
-fi
-
 ac_fn_c_check_func "$LINENO" "explicit_bzero" "ac_cv_func_explicit_bzero"
 if test "x$ac_cv_func_explicit_bzero" = xyes; then :
   $as_echo "#define HAVE_EXPLICIT_BZERO 1" >>confdefs.h
@@ -16526,6 +16516,12 @@ esac
   case " $LIBOBJS " in
   *" system.$ac_objext "* ) ;;
   *) LIBOBJS="$LIBOBJS system.$ac_objext"
+ ;;
+esac
+
+  case " $LIBOBJS " in
+  *" win32common.$ac_objext "* ) ;;
+  *) LIBOBJS="$LIBOBJS win32common.$ac_objext"
  ;;
 esac
 

@@ -543,7 +543,7 @@ range_deduplicate_values(Ranges *range)
 	 */
 	qsort_arg(&range->values[start],
 			  range->nvalues, sizeof(Datum),
-			  compare_values, (void *) &cxt);
+			  compare_values, &cxt);
 
 	n = 1;
 	for (i = 1; i < range->nvalues; i++)
@@ -1197,7 +1197,7 @@ sort_expanded_ranges(FmgrInfo *cmp, Oid colloid,
 	 * some of the points) and do merge sort.
 	 */
 	qsort_arg(eranges, neranges, sizeof(ExpandedRange),
-			  compare_expanded_ranges, (void *) &cxt);
+			  compare_expanded_ranges, &cxt);
 
 	/*
 	 * Deduplicate the ranges - simply compare each range to the preceding
@@ -1535,7 +1535,7 @@ reduce_expanded_ranges(ExpandedRange *eranges, int neranges,
 	 * sorted result.
 	 */
 	qsort_arg(values, nvalues, sizeof(Datum),
-			  compare_values, (void *) &cxt);
+			  compare_values, &cxt);
 
 	/* We have nvalues boundary values, which means nvalues/2 ranges. */
 	for (i = 0; i < (nvalues / 2); i++)
@@ -2364,14 +2364,14 @@ brin_minmax_multi_distance_inet(PG_FUNCTION_ARGS)
 		unsigned char mask;
 		int			nbits;
 
-		nbits = lena - (i * 8);
+		nbits = Max(0, lena - (i * 8));
 		if (nbits < 8)
 		{
 			mask = (0xFF << (8 - nbits));
 			addra[i] = (addra[i] & mask);
 		}
 
-		nbits = lenb - (i * 8);
+		nbits = Max(0, lenb - (i * 8));
 		if (nbits < 8)
 		{
 			mask = (0xFF << (8 - nbits));
@@ -2953,7 +2953,6 @@ minmax_multi_get_strategy_procinfo(BrinDesc *bdesc, uint16 attno, Oid subtype,
 		HeapTuple	tuple;
 		Oid			opfamily,
 					oprid;
-		bool		isNull;
 
 		opfamily = bdesc->bd_index->rd_opfamily[attno - 1];
 		attr = TupleDescAttr(bdesc->bd_tupdesc, attno - 1);
@@ -2965,10 +2964,10 @@ minmax_multi_get_strategy_procinfo(BrinDesc *bdesc, uint16 attno, Oid subtype,
 			elog(ERROR, "missing operator %d(%u,%u) in opfamily %u",
 				 strategynum, attr->atttypid, subtype, opfamily);
 
-		oprid = DatumGetObjectId(SysCacheGetAttr(AMOPSTRATEGY, tuple,
-												 Anum_pg_amop_amopopr, &isNull));
+		oprid = DatumGetObjectId(SysCacheGetAttrNotNull(AMOPSTRATEGY, tuple,
+														Anum_pg_amop_amopopr));
 		ReleaseSysCache(tuple);
-		Assert(!isNull && RegProcedureIsValid(oprid));
+		Assert(RegProcedureIsValid(oprid));
 
 		fmgr_info_cxt(get_opcode(oprid),
 					  &opaque->strategy_procinfos[strategynum - 1],

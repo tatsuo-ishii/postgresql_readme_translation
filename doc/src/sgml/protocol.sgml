@@ -316,24 +316,6 @@
      </varlistentry>
 
      <varlistentry>
-      <term>AuthenticationSCMCredential</term>
-      <listitem>
-       <para>
-        This response is only possible for local Unix-domain connections
-        on platforms that support SCM credential messages.  The frontend
-        must issue an SCM credential message and then send a single data
-        byte.  (The contents of the data byte are uninteresting; it's
-        only used to ensure that the server waits long enough to receive
-        the credential message.)  If the credential is acceptable,
-        the server responds with an
-        AuthenticationOk, otherwise it responds with an ErrorResponse.
-        (This message type is only issued by pre-9.1 servers.  It may
-        eventually be removed from the protocol specification.)
-       </para>
-      </listitem>
-     </varlistentry>
-
-     <varlistentry>
       <term>AuthenticationGSS</term>
       <listitem>
        <para>
@@ -2747,7 +2729,8 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            level.  Otherwise, it should be a comma-separated list of items,
            each of the form <replaceable>keyword</replaceable> or
            <replaceable>keyword=value</replaceable>. Currently, the supported
-           keywords are <literal>level</literal> and <literal>workers</literal>.
+           keywords are <literal>level</literal>, <literal>long</literal> and
+           <literal>workers</literal>.
           </para>
 
           <para>
@@ -2762,6 +2745,13 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
            and <literal>ZSTD_maxCLevel()</literal> (usually <literal>22</literal>),
            (default <literal>ZSTD_CLEVEL_DEFAULT</literal> or
            <literal>3</literal>).
+          </para>
+
+          <para>
+           The <literal>long</literal> keyword enables long-distance matching
+           mode, for improved compression ratio, at the expense of higher memory
+           use.  Long-distance mode is supported only for
+           <literal>zstd</literal>.
           </para>
 
           <para>
@@ -3449,40 +3439,6 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </listitem>
    </varlistentry>
 
-   <varlistentry id="protocol-message-formats-AuthenticationSCMCredential">
-    <term>AuthenticationSCMCredential (B)</term>
-    <listitem>
-     <variablelist>
-      <varlistentry>
-       <term>Byte1('R')</term>
-       <listitem>
-        <para>
-         Identifies the message as an authentication request.
-        </para>
-       </listitem>
-      </varlistentry>
-
-      <varlistentry>
-       <term>Int32(8)</term>
-       <listitem>
-        <para>
-         Length of message contents in bytes, including self.
-        </para>
-       </listitem>
-      </varlistentry>
-
-      <varlistentry>
-       <term>Int32(6)</term>
-       <listitem>
-        <para>
-         Specifies that an SCM credentials message is required.
-        </para>
-       </listitem>
-      </varlistentry>
-     </variablelist>
-    </listitem>
-   </varlistentry>
-
    <varlistentry id="protocol-message-formats-AuthenticationGSS">
     <term>AuthenticationGSS (B)</term>
     <listitem>
@@ -4113,6 +4069,13 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
         For an <command>UPDATE</command> command, the tag is
         <literal>UPDATE <replaceable>rows</replaceable></literal> where
         <replaceable>rows</replaceable> is the number of rows updated.
+       </para>
+
+       <para>
+        For a <command>MERGE</command> command, the tag is
+        <literal>MERGE <replaceable>rows</replaceable></literal> where
+        <replaceable>rows</replaceable> is the number of rows inserted,
+        updated, or deleted.
        </para>
 
        <para>

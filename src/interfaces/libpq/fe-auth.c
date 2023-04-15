@@ -58,7 +58,8 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 {
 	OM_uint32	maj_stat,
 				min_stat,
-				lmin_s;
+				lmin_s,
+				gss_flags = GSS_C_MUTUAL_FLAG;
 	gss_buffer_desc ginbuf;
 	gss_buffer_desc goutbuf;
 
@@ -73,7 +74,7 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 		if (!ginbuf.value)
 		{
 			libpq_append_conn_error(conn, "out of memory allocating GSSAPI buffer (%d)",
-							  payloadlen);
+									payloadlen);
 			return STATUS_ERROR;
 		}
 		if (pqGetnchar(ginbuf.value, payloadlen, conn))
@@ -92,12 +93,19 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 		ginbuf.value = NULL;
 	}
 
+	/* Only try to acquire credentials if GSS delegation isn't disabled. */
+	if (!pg_GSS_have_cred_cache(&conn->gcred))
+		conn->gcred = GSS_C_NO_CREDENTIAL;
+
+	if (conn->gssdeleg && pg_strcasecmp(conn->gssdeleg, "enable") == 0)
+		gss_flags |= GSS_C_DELEG_FLAG;
+
 	maj_stat = gss_init_sec_context(&min_stat,
-									GSS_C_NO_CREDENTIAL,
+									conn->gcred,
 									&conn->gctx,
 									conn->gtarg_nam,
 									GSS_C_NO_OID,
-									GSS_C_MUTUAL_FLAG,
+									gss_flags,
 									0,
 									GSS_C_NO_CHANNEL_BINDINGS,
 									(ginbuf.value == NULL) ? GSS_C_NO_BUFFER : &ginbuf,
@@ -136,7 +144,11 @@ pg_GSS_continue(PGconn *conn, int payloadlen)
 	}
 
 	if (maj_stat == GSS_S_COMPLETE)
+	{
+		conn->client_finished_auth = true;
 		gss_release_name(&lmin_s, &conn->gtarg_nam);
+		conn->gssapi_used = true;
+	}
 
 	return STATUS_OK;
 }
@@ -223,7 +235,7 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 		if (!inputbuf)
 		{
 			libpq_append_conn_error(conn, "out of memory allocating SSPI buffer (%d)",
-							  payloadlen);
+									payloadlen);
 			return STATUS_ERROR;
 		}
 		if (pqGetnchar(inputbuf, payloadlen, conn))
@@ -320,6 +332,9 @@ pg_SSPI_continue(PGconn *conn, int payloadlen)
 		}
 		FreeContextBuffer(outbuf.pBuffers[0].pvBuffer);
 	}
+
+	if (r == SEC_E_OK)
+		conn->client_finished_auth = true;
 
 	/* Cleanup is handled by the code in freePGconn() */
 	return STATUS_OK;
@@ -623,7 +638,7 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 	if (!challenge)
 	{
 		libpq_append_conn_error(conn, "out of memory allocating SASL buffer (%d)",
-						  payloadlen);
+								payloadlen);
 		return STATUS_ERROR;
 	}
 
@@ -680,66 +695,6 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 		return STATUS_ERROR;
 
 	return STATUS_OK;
-}
-
-/*
- * Respond to AUTH_REQ_SCM_CREDS challenge.
- *
- * Note: this is dead code as of Postgres 9.1, because current backends will
- * never send this challenge.  But we must keep it as long as libpq needs to
- * interoperate with pre-9.1 servers.  It is believed to be needed only on
- * Debian/kFreeBSD (ie, FreeBSD kernel with Linux userland, so that the
- * getpeereid() function isn't provided by libc).
- */
-static int
-pg_local_sendauth(PGconn *conn)
-{
-#ifdef HAVE_STRUCT_CMSGCRED
-	char		buf;
-	struct iovec iov;
-	struct msghdr msg;
-	struct cmsghdr *cmsg;
-	union
-	{
-		struct cmsghdr hdr;
-		unsigned char buf[CMSG_SPACE(sizeof(struct cmsgcred))];
-	}			cmsgbuf;
-
-	/*
-	 * The backend doesn't care what we send here, but it wants exactly one
-	 * character to force recvmsg() to block and wait for us.
-	 */
-	buf = '\0';
-	iov.iov_base = &buf;
-	iov.iov_len = 1;
-
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-
-	/* We must set up a message that will be filled in by kernel */
-	memset(&cmsgbuf, 0, sizeof(cmsgbuf));
-	msg.msg_control = &cmsgbuf.buf;
-	msg.msg_controllen = sizeof(cmsgbuf.buf);
-	cmsg = CMSG_FIRSTHDR(&msg);
-	cmsg->cmsg_len = CMSG_LEN(sizeof(struct cmsgcred));
-	cmsg->cmsg_level = SOL_SOCKET;
-	cmsg->cmsg_type = SCM_CREDS;
-
-	if (sendmsg(conn->sock, &msg, 0) == -1)
-	{
-		char		sebuf[PG_STRERROR_R_BUFLEN];
-
-		appendPQExpBuffer(&conn->errorMessage,
-						  "pg_local_sendauth: sendmsg: %s\n",
-						  strerror_r(errno, sebuf, sizeof(sebuf)));
-		return STATUS_ERROR;
-	}
-	return STATUS_OK;
-#else
-	libpq_append_conn_error(conn, "SCM_CRED authentication method not supported");
-	return STATUS_ERROR;
-#endif
 }
 
 static int
@@ -806,6 +761,39 @@ pg_password_sendauth(PGconn *conn, const char *password, AuthRequest areq)
 }
 
 /*
+ * Translate a disallowed AuthRequest code into an error message.
+ */
+static const char *
+auth_method_description(AuthRequest areq)
+{
+	switch (areq)
+	{
+		case AUTH_REQ_PASSWORD:
+			return libpq_gettext("server requested a cleartext password");
+		case AUTH_REQ_MD5:
+			return libpq_gettext("server requested a hashed password");
+		case AUTH_REQ_GSS:
+		case AUTH_REQ_GSS_CONT:
+			return libpq_gettext("server requested GSSAPI authentication");
+		case AUTH_REQ_SSPI:
+			return libpq_gettext("server requested SSPI authentication");
+		case AUTH_REQ_SASL:
+		case AUTH_REQ_SASL_CONT:
+		case AUTH_REQ_SASL_FIN:
+			return libpq_gettext("server requested SASL authentication");
+	}
+
+	return libpq_gettext("server requested an unknown authentication type");
+}
+
+/*
+ * Convenience macro for checking the allowed_auth_methods bitmask.  Caller
+ * must ensure that type is not greater than 31 (high bit of the bitmask).
+ */
+#define auth_method_allowed(conn, type) \
+	(((conn)->allowed_auth_methods & (1 << (type))) != 0)
+
+/*
  * Verify that the authentication request is expected, given the connection
  * parameters. This is especially important when the client wishes to
  * authenticate the server before any sensitive information is exchanged.
@@ -814,6 +802,117 @@ static bool
 check_expected_areq(AuthRequest areq, PGconn *conn)
 {
 	bool		result = true;
+	const char *reason = NULL;
+
+	StaticAssertDecl((sizeof(conn->allowed_auth_methods) * CHAR_BIT) > AUTH_REQ_MAX,
+					 "AUTH_REQ_MAX overflows the allowed_auth_methods bitmask");
+
+	if (conn->sslcertmode[0] == 'r' /* require */
+		&& areq == AUTH_REQ_OK)
+	{
+		/*
+		 * Trade off a little bit of complexity to try to get these error
+		 * messages as precise as possible.
+		 */
+		if (!conn->ssl_cert_requested)
+		{
+			libpq_append_conn_error(conn, "server did not request an SSL certificate");
+			return false;
+		}
+		else if (!conn->ssl_cert_sent)
+		{
+			libpq_append_conn_error(conn, "server accepted connection without a valid SSL certificate");
+			return false;
+		}
+	}
+
+	/*
+	 * If the user required a specific auth method, or specified an allowed
+	 * set, then reject all others here, and make sure the server actually
+	 * completes an authentication exchange.
+	 */
+	if (conn->require_auth)
+	{
+		switch (areq)
+		{
+			case AUTH_REQ_OK:
+
+				/*
+				 * Check to make sure we've actually finished our exchange (or
+				 * else that the user has allowed an authentication-less
+				 * connection).
+				 *
+				 * If the user has allowed both SCRAM and unauthenticated
+				 * (trust) connections, then this check will silently accept
+				 * partial SCRAM exchanges, where a misbehaving server does
+				 * not provide its verifier before sending an OK.  This is
+				 * consistent with historical behavior, but it may be a point
+				 * to revisit in the future, since it could allow a server
+				 * that doesn't know the user's password to silently harvest
+				 * material for a brute force attack.
+				 */
+				if (!conn->auth_required || conn->client_finished_auth)
+					break;
+
+				/*
+				 * No explicit authentication request was made by the server
+				 * -- or perhaps it was made and not completed, in the case of
+				 * SCRAM -- but there is one special case to check.  If the
+				 * user allowed "gss", then a GSS-encrypted channel also
+				 * satisfies the check.
+				 */
+#ifdef ENABLE_GSS
+				if (auth_method_allowed(conn, AUTH_REQ_GSS) && conn->gssenc)
+				{
+					/*
+					 * If implicit GSS auth has already been performed via GSS
+					 * encryption, we don't need to have performed an
+					 * AUTH_REQ_GSS exchange.  This allows require_auth=gss to
+					 * be combined with gssencmode, since there won't be an
+					 * explicit authentication request in that case.
+					 */
+				}
+				else
+#endif
+				{
+					reason = libpq_gettext("server did not complete authentication");
+					result = false;
+				}
+
+				break;
+
+			case AUTH_REQ_PASSWORD:
+			case AUTH_REQ_MD5:
+			case AUTH_REQ_GSS:
+			case AUTH_REQ_GSS_CONT:
+			case AUTH_REQ_SSPI:
+			case AUTH_REQ_SASL:
+			case AUTH_REQ_SASL_CONT:
+			case AUTH_REQ_SASL_FIN:
+
+				/*
+				 * We don't handle these with the default case, to avoid
+				 * bit-shifting past the end of the allowed_auth_methods mask
+				 * if the server sends an unexpected AuthRequest.
+				 */
+				result = auth_method_allowed(conn, areq);
+				break;
+
+			default:
+				result = false;
+				break;
+		}
+	}
+
+	if (!result)
+	{
+		if (!reason)
+			reason = auth_method_description(areq);
+
+		libpq_append_conn_error(conn, "auth method \"%s\" requirement failed: %s",
+								conn->require_auth, reason);
+		return result;
+	}
 
 	/*
 	 * When channel_binding=require, we must protect against two cases: (1) we
@@ -1008,6 +1107,9 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 										 "fe_sendauth: error sending password authentication\n");
 					return STATUS_ERROR;
 				}
+
+				/* We expect no further authentication requests. */
+				conn->client_finished_auth = true;
 				break;
 			}
 
@@ -1042,11 +1144,6 @@ pg_fe_sendauth(AuthRequest areq, int payloadlen, PGconn *conn)
 										 "fe_sendauth: error in SASL authentication\n");
 				return STATUS_ERROR;
 			}
-			break;
-
-		case AUTH_REQ_SCM_CREDS:
-			if (pg_local_sendauth(conn) != STATUS_OK)
-				return STATUS_ERROR;
 			break;
 
 		default:
@@ -1253,7 +1350,9 @@ PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user,
 	{
 		const char *errstr = NULL;
 
-		crypt_pwd = pg_fe_scram_build_secret(passwd, &errstr);
+		crypt_pwd = pg_fe_scram_build_secret(passwd,
+											 conn->scram_sha_256_iterations,
+											 &errstr);
 		if (!crypt_pwd)
 			libpq_append_conn_error(conn, "could not encrypt password: %s", errstr);
 	}
@@ -1277,7 +1376,7 @@ PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user,
 	else
 	{
 		libpq_append_conn_error(conn, "unrecognized password encryption algorithm \"%s\"",
-						  algorithm);
+								algorithm);
 		return NULL;
 	}
 

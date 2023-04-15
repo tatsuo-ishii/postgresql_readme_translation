@@ -166,7 +166,7 @@ blbuildempty(Relation index)
 	Page		metapage;
 
 	/* Construct metapage. */
-	metapage = (Page) palloc(BLCKSZ);
+	metapage = (Page) palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE, 0);
 	BloomFillMetapage(index, metapage);
 
 	/*
@@ -178,7 +178,7 @@ blbuildempty(Relation index)
 	 */
 	PageSetChecksumInplace(metapage, BLOOM_METAPAGE_BLKNO);
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BLOOM_METAPAGE_BLKNO,
-			  (char *) metapage, true);
+			  metapage, true);
 	log_newpage(&(RelationGetSmgr(index))->smgr_rlocator.locator, INIT_FORKNUM,
 				BLOOM_METAPAGE_BLKNO, metapage, true);
 

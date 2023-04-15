@@ -25,7 +25,7 @@ env:
   MTEST_ARGS: --print-errorlogs --no-rebuild -C build
   PGCTLTIMEOUT: 120 # avoids spurious failures during parallel tests
   TEMP_CONFIG: ${CIRRUS_WORKING_DIR}/src/tools/ci/pg_ci_base.conf
-  PG_TEST_EXTRA: kerberos ldap ssl
+  PG_TEST_EXTRA: kerberos ldap ssl load_balance
 
 
 # What files to preserve in case tests fail
@@ -181,7 +181,7 @@ task:
     su postgres <<-EOF
       meson setup \
         --buildtype=debug \
-        -Dcassert=true -Dssl=openssl -Duuid=bsd -Dtcl_version=tcl86 -Ddtrace=auto \
+        -Dcassert=true -Duuid=bsd -Dtcl_version=tcl86 -Ddtrace=auto \
         -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
         -Dextra_lib_dirs=/usr/local/lib -Dextra_include_dirs=/usr/local/include/ \
         build
@@ -211,6 +211,12 @@ task:
     EOF
 
   on_failure:
+    # if the server continues running, it often causes cirrus-ci to fail
+    # during upload, as it doesn't expect artifacts to change size
+    stop_running_script: |
+      su postgres <<-EOF
+        build/tmp_install/usr/local/pgsql/bin/pg_ctl -D build/runningcheck stop || true
+      EOF
     <<: *on_failure_meson
     cores_script: src/tools/ci/cores_backtrace.sh freebsd /tmp/cores
 
@@ -237,7 +243,6 @@ LINUX_CONFIGURE_FEATURES: &LINUX_CONFIGURE_FEATURES >-
 
 LINUX_MESON_FEATURES: &LINUX_MESON_FEATURES >-
   -Dllvm=enabled
-  -Dssl=openssl
   -Duuid=e2fs
 
 
@@ -308,6 +313,14 @@ task:
     mkdir -m 770 /tmp/cores
     chown root:postgres /tmp/cores
     sysctl kernel.core_pattern='/tmp/cores/%e-%s-%p.core'
+
+  setup_hosts_file_script: |
+    cat >> /etc/hosts <<-EOF
+      127.0.0.1 pg-loadbalancetest
+      127.0.0.2 pg-loadbalancetest
+      127.0.0.3 pg-loadbalancetest
+    EOF
+
   setup_additional_packages_script: |
     #apt-get update
     #DEBIAN_FRONTEND=noninteractive apt-get -y install ...
@@ -404,7 +417,7 @@ task:
 
 
 task:
-  name: macOS - Monterey - Meson
+  name: macOS - Ventura - Meson
 
   env:
     CPUS: 4 # always get that much for cirrusci macOS instances
@@ -429,7 +442,7 @@ task:
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*(macos|darwin|osx).*'
 
   macos_instance:
-    image: ghcr.io/cirruslabs/macos-monterey-base:latest
+    image: ghcr.io/cirruslabs/macos-ventura-base:latest
 
   sysinfo_script: |
     id
@@ -464,12 +477,24 @@ task:
       make \
       meson \
       openldap \
-      openssl \
+      openssl@3 \
       python \
       tcl-tk \
       zstd
 
     brew cleanup -s # to reduce cache size
+
+    # brew cleanup removes the empty certs directory in OPENSSLDIR, causing
+    # OpenSSL to report unexpected errors ("unregistered scheme") during
+    # verification failures. Put it back for now as a workaround.
+    #
+    #   https://github.com/orgs/Homebrew/discussions/4030
+    #
+    # Note that $(brew --prefix openssl) will give us the opt/ prefix but not
+    # the etc/ prefix, so we hardcode the full path here. openssl@3 is pinned
+    # above to try to minimize the chances of this changing beneath us, but it's
+    # brittle...
+    mkdir -p "/opt/homebrew/etc/openssl@3/certs"
   upload_caches: homebrew
 
   ccache_cache:
@@ -491,7 +516,7 @@ task:
       -Dextra_include_dirs=${brewpath}/include \
       -Dextra_lib_dirs=${brewpath}/lib \
       -Dcassert=true \
-      -Dssl=openssl -Duuid=e2fs -Ddtrace=auto \
+      -Duuid=e2fs -Ddtrace=auto \
       -Dsegsize_blocks=6 \
       -DPG_TEST_EXTRA="$PG_TEST_EXTRA" \
       build
@@ -549,18 +574,26 @@ task:
   depends_on: SanityCheck
   only_if: $CIRRUS_CHANGE_MESSAGE !=~ '.*\nci-os-only:.*' || $CIRRUS_CHANGE_MESSAGE =~ '.*\nci-os-only:[^\n]*windows.*'
 
-  windows_container:
-    image: $CONTAINER_REPO/windows_ci_vs_2019:latest
+  compute_engine_instance:
+    image_project: $IMAGE_PROJECT
+    image: family/pg-ci-windows-ci-vs-2019
+    platform: windows
     cpu: $CPUS
     memory: 4G
 
   setup_additional_packages_script: |
     REM choco install -y --no-progress ...
 
+  setup_hosts_file_script: |
+    echo 127.0.0.1 pg-loadbalancetest >> c:\Windows\System32\Drivers\etc\hosts
+    echo 127.0.0.2 pg-loadbalancetest >> c:\Windows\System32\Drivers\etc\hosts
+    echo 127.0.0.3 pg-loadbalancetest >> c:\Windows\System32\Drivers\etc\hosts
+    type c:\Windows\System32\Drivers\etc\hosts
+
   # Use /DEBUG:FASTLINK to avoid high memory usage during linking
   configure_script: |
     vcvarsall x64
-    meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Db_pch=true -Dssl=openssl -Dextra_lib_dirs=c:\openssl\1.1\lib -Dextra_include_dirs=c:\openssl\1.1\include -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" build
+    meson setup --backend ninja --buildtype debug -Dc_link_args=/DEBUG:FASTLINK -Dcassert=true -Db_pch=true -Dextra_lib_dirs=c:\openssl\1.1\lib -Dextra_include_dirs=c:\openssl\1.1\include -DTAR=%TAR% -DPG_TEST_EXTRA="%PG_TEST_EXTRA%" build
 
   build_script: |
     vcvarsall x64
@@ -589,8 +622,10 @@ task:
   # otherwise it'll be sorted before other tasks
   depends_on: SanityCheck
 
-  windows_container:
-    image: $CONTAINER_REPO/windows_ci_mingw64:latest
+  compute_engine_instance:
+    image_project: $IMAGE_PROJECT
+    image: family/pg-ci-windows-ci-mingw64
+    platform: windows
     cpu: $CPUS
     memory: 4G
 
@@ -655,7 +690,7 @@ task:
 
     # Use larger ccache cache, as this task compiles with multiple compilers /
     # flag combinations
-    CCACHE_MAXSIZE: "1GB"
+    CCACHE_MAXSIZE: "1G"
     CCACHE_DIR: "/tmp/ccache_dir"
 
     LINUX_CONFIGURE_FEATURES: *LINUX_CONFIGURE_FEATURES

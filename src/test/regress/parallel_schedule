@@ -11,11 +11,6 @@
 # required setup steps
 test: test_setup
 
-# run tablespace by itself, and early, because it forces a checkpoint;
-# we'd prefer not to have checkpoints later in the tests because that
-# interferes with crash-recovery testing.
-test: tablespace
-
 # ----------
 # The first group of parallel tests
 # ----------
@@ -108,7 +103,7 @@ test: select_views portals_p2 foreign_key cluster dependency guc bitmapops combo
 # ----------
 # Another group of parallel tests (JSON related)
 # ----------
-test: json jsonb json_encoding jsonpath jsonpath_encoding jsonb_jsonpath
+test: json jsonb json_encoding jsonpath jsonpath_encoding jsonb_jsonpath sqljson
 
 # ----------
 # Another group of parallel tests
@@ -132,3 +127,7 @@ test: event_trigger oidjoins
 
 # this test also uses event triggers, so likewise run it by itself
 test: fast_default
+
+# run tablespace test at the end because it drops the tablespace created during
+# setup that other tests may use.
+test: tablespace

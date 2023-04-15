@@ -364,9 +364,9 @@ static SERIALIZABLEXACT *OldCommittedSxact;
  * attempt to degrade performance (mostly as false positive serialization
  * failure) gracefully in the face of memory pressure.
  */
-int			max_predicate_locks_per_xact;	/* set by guc.c */
-int			max_predicate_locks_per_relation;	/* set by guc.c */
-int			max_predicate_locks_per_page;	/* set by guc.c */
+int			max_predicate_locks_per_xact;	/* in guc_tables.c */
+int			max_predicate_locks_per_relation;	/* in guc_tables.c */
+int			max_predicate_locks_per_page;	/* in guc_tables.c */
 
 /*
  * This provides a list of objects in order to track transactions
@@ -1563,29 +1563,36 @@ GetSafeSnapshotBlockingPids(int blocked_pid, int *output, int output_size)
 {
 	int			num_written = 0;
 	dlist_iter	iter;
-	SERIALIZABLEXACT *sxact = NULL;
+	SERIALIZABLEXACT *blocking_sxact = NULL;
 
 	LWLockAcquire(SerializableXactHashLock, LW_SHARED);
 
 	/* Find blocked_pid's SERIALIZABLEXACT by linear search. */
 	dlist_foreach(iter, &PredXact->activeList)
 	{
-		sxact = dlist_container(SERIALIZABLEXACT, xactLink, iter.cur);
+		SERIALIZABLEXACT *sxact =
+			dlist_container(SERIALIZABLEXACT, xactLink, iter.cur);
 
 		if (sxact->pid == blocked_pid)
+		{
+			blocking_sxact = sxact;
 			break;
+		}
 	}
 
 	/* Did we find it, and is it currently waiting in GetSafeSnapshot? */
-	if (sxact != NULL && SxactIsDeferrableWaiting(sxact))
+	if (blocking_sxact != NULL && SxactIsDeferrableWaiting(blocking_sxact))
 	{
 		/* Traverse the list of possible unsafe conflicts collecting PIDs. */
-		dlist_foreach(iter, &sxact->possibleUnsafeConflicts)
+		dlist_foreach(iter, &blocking_sxact->possibleUnsafeConflicts)
 		{
 			RWConflict	possibleUnsafeConflict =
 			dlist_container(RWConflictData, inLink, iter.cur);
 
 			output[num_written++] = possibleUnsafeConflict->sxactOut->pid;
+
+			if (num_written >= output_size)
+				break;
 		}
 	}
 
@@ -1775,24 +1782,6 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 		return snapshot;
 	}
 
-	/* Maintain serializable global xmin info. */
-	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
-	{
-		Assert(PredXact->SxactGlobalXminCount == 0);
-		PredXact->SxactGlobalXmin = snapshot->xmin;
-		PredXact->SxactGlobalXminCount = 1;
-		SerialSetActiveSerXmin(snapshot->xmin);
-	}
-	else if (TransactionIdEquals(snapshot->xmin, PredXact->SxactGlobalXmin))
-	{
-		Assert(PredXact->SxactGlobalXminCount > 0);
-		PredXact->SxactGlobalXminCount++;
-	}
-	else
-	{
-		Assert(TransactionIdFollows(snapshot->xmin, PredXact->SxactGlobalXmin));
-	}
-
 	/* Initialize the structure. */
 	sxact->vxid = vxid;
 	sxact->SeqNo.lastCommitBeforeSnapshot = PredXact->LastSxactCommitSeqNo;
@@ -1832,12 +1821,43 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 				SetPossibleUnsafeConflict(sxact, othersxact);
 			}
 		}
+
+		/*
+		 * If we didn't find any possibly unsafe conflicts because every
+		 * uncommitted writable transaction turned out to be doomed, then we
+		 * can "opt out" immediately.  See comments above the earlier check for
+		 * PredXact->WritableSxactCount == 0.
+		 */
+		if (dlist_is_empty(&sxact->possibleUnsafeConflicts))
+		{
+			ReleasePredXact(sxact);
+			LWLockRelease(SerializableXactHashLock);
+			return snapshot;
+		}
 	}
 	else
 	{
 		++(PredXact->WritableSxactCount);
 		Assert(PredXact->WritableSxactCount <=
 			   (MaxBackends + max_prepared_xacts));
+	}
+
+	/* Maintain serializable global xmin info. */
+	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
+	{
+		Assert(PredXact->SxactGlobalXminCount == 0);
+		PredXact->SxactGlobalXmin = snapshot->xmin;
+		PredXact->SxactGlobalXminCount = 1;
+		SerialSetActiveSerXmin(snapshot->xmin);
+	}
+	else if (TransactionIdEquals(snapshot->xmin, PredXact->SxactGlobalXmin))
+	{
+		Assert(PredXact->SxactGlobalXminCount > 0);
+		PredXact->SxactGlobalXminCount++;
+	}
+	else
+	{
+		Assert(TransactionIdFollows(snapshot->xmin, PredXact->SxactGlobalXmin));
 	}
 
 	MySerializableXact = sxact;
@@ -3225,6 +3245,7 @@ SetNewSxactGlobalXmin(void)
 void
 ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 {
+	bool		partiallyReleasing = false;
 	bool		needToClear;
 	SERIALIZABLEXACT *roXact;
 	dlist_mutable_iter iter;
@@ -3323,6 +3344,7 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 		else
 		{
 			MySerializableXact->flags |= SXACT_FLAG_PARTIALLY_RELEASED;
+			partiallyReleasing = true;
 			/* ... and proceed to perform the partial release below. */
 		}
 	}
@@ -3541,9 +3563,15 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 	 * serializable transactions completes.  We then find the "new oldest"
 	 * xmin and purge any transactions which finished before this transaction
 	 * was launched.
+	 *
+	 * For parallel queries in read-only transactions, it might run twice.
+	 * We only release the reference on the first call.
 	 */
 	needToClear = false;
-	if (TransactionIdEquals(MySerializableXact->xmin, PredXact->SxactGlobalXmin))
+	if ((partiallyReleasing ||
+		 !SxactIsPartiallyReleased(MySerializableXact)) &&
+		TransactionIdEquals(MySerializableXact->xmin,
+							PredXact->SxactGlobalXmin))
 	{
 		Assert(PredXact->SxactGlobalXminCount > 0);
 		if (--(PredXact->SxactGlobalXminCount) == 0)
@@ -4617,10 +4645,14 @@ PreCommit_CheckForSerializationFailure(void)
 
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 
-	/* Check if someone else has already decided that we need to die */
-	if (SxactIsDoomed(MySerializableXact))
+	/*
+	 * Check if someone else has already decided that we need to die.  Since
+	 * we set our own DOOMED flag when partially releasing, ignore in that
+	 * case.
+	 */
+	if (SxactIsDoomed(MySerializableXact) &&
+		!SxactIsPartiallyReleased(MySerializableXact))
 	{
-		Assert(!SxactIsPartiallyReleased(MySerializableXact));
 		LWLockRelease(SerializableXactHashLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),

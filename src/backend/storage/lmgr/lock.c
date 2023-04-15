@@ -608,7 +608,7 @@ LockHeldByMe(const LOCKTAG *locktag, LOCKMODE lockmode)
 	localtag.mode = lockmode;
 
 	locallock = (LOCALLOCK *) hash_search(LockMethodLocalHash,
-										  (void *) &localtag,
+										  &localtag,
 										  HASH_FIND, NULL);
 
 	return (locallock && locallock->nLocks > 0);
@@ -663,7 +663,7 @@ LockHasWaiters(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 	localtag.mode = lockmode;
 
 	locallock = (LOCALLOCK *) hash_search(LockMethodLocalHash,
-										  (void *) &localtag,
+										  &localtag,
 										  HASH_FIND, NULL);
 
 	/*
@@ -825,7 +825,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	localtag.mode = lockmode;
 
 	locallock = (LOCALLOCK *) hash_search(LockMethodLocalHash,
-										  (void *) &localtag,
+										  &localtag,
 										  HASH_ENTER, &found);
 
 	/*
@@ -1061,7 +1061,7 @@ LockAcquireExtended(const LOCKTAG *locktag,
 				dlist_delete(&proclock->lockLink);
 				dlist_delete(&proclock->procLink);
 				if (!hash_search_with_hash_value(LockMethodProcLockHash,
-												 (void *) &(proclock->tag),
+												 &(proclock->tag),
 												 proclock_hashcode,
 												 HASH_REMOVE,
 												 NULL))
@@ -1180,7 +1180,7 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 	 * Find or create a lock with this tag.
 	 */
 	lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-												(const void *) locktag,
+												locktag,
 												hashcode,
 												HASH_ENTER_NULL,
 												&found);
@@ -1222,7 +1222,7 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 	 * Find or create a proclock entry with this tag
 	 */
 	proclock = (PROCLOCK *) hash_search_with_hash_value(LockMethodProcLockHash,
-														(void *) &proclocktag,
+														&proclocktag,
 														proclock_hashcode,
 														HASH_ENTER_NULL,
 														&found);
@@ -1239,7 +1239,7 @@ SetupLockInTable(LockMethod lockMethodTable, PGPROC *proc,
 			 */
 			Assert(dlist_is_empty(&(lock->procLocks)));
 			if (!hash_search_with_hash_value(LockMethodLockHash,
-											 (void *) &(lock->tag),
+											 &(lock->tag),
 											 hashcode,
 											 HASH_REMOVE,
 											 NULL))
@@ -1391,7 +1391,7 @@ RemoveLocalLock(LOCALLOCK *locallock)
 	}
 
 	if (!hash_search(LockMethodLocalHash,
-					 (void *) &(locallock->tag),
+					 &(locallock->tag),
 					 HASH_REMOVE, NULL))
 		elog(WARNING, "locallock table corrupted");
 
@@ -1644,7 +1644,7 @@ CleanUpLock(LOCK *lock, PROCLOCK *proclock,
 		dlist_delete(&proclock->procLink);
 		proclock_hashcode = ProcLockHashCode(&proclock->tag, hashcode);
 		if (!hash_search_with_hash_value(LockMethodProcLockHash,
-										 (void *) &(proclock->tag),
+										 &(proclock->tag),
 										 proclock_hashcode,
 										 HASH_REMOVE,
 										 NULL))
@@ -1660,7 +1660,7 @@ CleanUpLock(LOCK *lock, PROCLOCK *proclock,
 		LOCK_PRINT("CleanUpLock: deleting", lock, 0);
 		Assert(dlist_is_empty(&lock->procLocks));
 		if (!hash_search_with_hash_value(LockMethodLockHash,
-										 (void *) &(lock->tag),
+										 &(lock->tag),
 										 hashcode,
 										 HASH_REMOVE,
 										 NULL))
@@ -1810,24 +1810,12 @@ WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner)
 {
 	LOCKMETHODID lockmethodid = LOCALLOCK_LOCKMETHOD(*locallock);
 	LockMethod	lockMethodTable = LockMethods[lockmethodid];
-	char	   *volatile new_status = NULL;
 
 	LOCK_PRINT("WaitOnLock: sleeping on lock",
 			   locallock->lock, locallock->tag.mode);
 
-	/* Report change to waiting status */
-	if (update_process_title)
-	{
-		const char *old_status;
-		int			len;
-
-		old_status = get_ps_display(&len);
-		new_status = (char *) palloc(len + 8 + 1);
-		memcpy(new_status, old_status, len);
-		strcpy(new_status + len, " waiting");
-		set_ps_display(new_status);
-		new_status[len] = '\0'; /* truncate off " waiting" */
-	}
+	/* adjust the process title to indicate that it's waiting */
+	set_ps_display_suffix("waiting");
 
 	awaitedLock = locallock;
 	awaitedOwner = owner;
@@ -1874,12 +1862,8 @@ WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner)
 	{
 		/* In this path, awaitedLock remains set until LockErrorCleanup */
 
-		/* Report change to non-waiting status */
-		if (update_process_title)
-		{
-			set_ps_display(new_status);
-			pfree(new_status);
-		}
+		/* reset ps display to remove the suffix */
+		set_ps_display_remove_suffix();
 
 		/* and propagate the error */
 		PG_RE_THROW();
@@ -1888,12 +1872,8 @@ WaitOnLock(LOCALLOCK *locallock, ResourceOwner owner)
 
 	awaitedLock = NULL;
 
-	/* Report change to non-waiting status */
-	if (update_process_title)
-	{
-		set_ps_display(new_status);
-		pfree(new_status);
-	}
+	/* reset ps display to remove the suffix */
+	set_ps_display_remove_suffix();
 
 	LOCK_PRINT("WaitOnLock: wakeup on lock",
 			   locallock->lock, locallock->tag.mode);
@@ -1998,7 +1978,7 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 	localtag.mode = lockmode;
 
 	locallock = (LOCALLOCK *) hash_search(LockMethodLocalHash,
-										  (void *) &localtag,
+										  &localtag,
 										  HASH_FIND, NULL);
 
 	/*
@@ -2112,7 +2092,7 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 
 		Assert(EligibleForRelationFastPath(locktag, lockmode));
 		lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-													(const void *) locktag,
+													locktag,
 													locallock->hashcode,
 													HASH_FIND,
 													NULL);
@@ -2123,7 +2103,7 @@ LockRelease(const LOCKTAG *locktag, LOCKMODE lockmode, bool sessionLock)
 		proclocktag.myLock = lock;
 		proclocktag.myProc = MyProc;
 		locallock->proclock = (PROCLOCK *) hash_search(LockMethodProcLockHash,
-													   (void *) &proclocktag,
+													   &proclocktag,
 													   HASH_FIND,
 													   NULL);
 		if (!locallock->proclock)
@@ -2851,7 +2831,7 @@ FastPathGetRelationLockEntry(LOCALLOCK *locallock)
 		LWLockAcquire(partitionLock, LW_SHARED);
 
 		lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-													(void *) locktag,
+													locktag,
 													locallock->hashcode,
 													HASH_FIND,
 													NULL);
@@ -2864,7 +2844,7 @@ FastPathGetRelationLockEntry(LOCALLOCK *locallock)
 		proclock_hashcode = ProcLockHashCode(&proclocktag, locallock->hashcode);
 		proclock = (PROCLOCK *)
 			hash_search_with_hash_value(LockMethodProcLockHash,
-										(void *) &proclocktag,
+										&proclocktag,
 										proclock_hashcode,
 										HASH_FIND,
 										NULL);
@@ -3028,7 +3008,7 @@ GetLockConflicts(const LOCKTAG *locktag, LOCKMODE lockmode, int *countp)
 	LWLockAcquire(partitionLock, LW_SHARED);
 
 	lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-												(const void *) locktag,
+												locktag,
 												hashcode,
 												HASH_FIND,
 												NULL);
@@ -3125,7 +3105,7 @@ LockRefindAndRelease(LockMethod lockMethodTable, PGPROC *proc,
 	 * Re-find the lock object (it had better be there).
 	 */
 	lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-												(void *) locktag,
+												locktag,
 												hashcode,
 												HASH_FIND,
 												NULL);
@@ -3141,7 +3121,7 @@ LockRefindAndRelease(LockMethod lockMethodTable, PGPROC *proc,
 	proclock_hashcode = ProcLockHashCode(&proclocktag, hashcode);
 
 	proclock = (PROCLOCK *) hash_search_with_hash_value(LockMethodProcLockHash,
-														(void *) &proclocktag,
+														&proclocktag,
 														proclock_hashcode,
 														HASH_FIND,
 														NULL);
@@ -3255,7 +3235,7 @@ CheckForSessionAndXactLocks(void)
 
 		/* Otherwise, find or make an entry in lockhtab */
 		hentry = (PerLockTagEntry *) hash_search(lockhtab,
-												 (void *) &locallock->tag.lock,
+												 &locallock->tag.lock,
 												 HASH_ENTER, &found);
 		if (!found)				/* initialize, if newly created */
 			hentry->sessLock = hentry->xactLock = false;
@@ -3555,8 +3535,8 @@ PostPrepare_Locks(TransactionId xid)
 			 * given lock with my own proc.
 			 */
 			if (!hash_update_hash_key(LockMethodProcLockHash,
-									  (void *) proclock,
-									  (void *) &proclocktag))
+									  proclock,
+									  &proclocktag))
 				elog(PANIC, "duplicate entry found while reassigning a prepared transaction's locks");
 
 			/* Re-link into the new proc's proclock list */
@@ -4202,7 +4182,7 @@ lock_twophase_recover(TransactionId xid, uint16 info,
 	 * Find or create a lock with this tag.
 	 */
 	lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-												(void *) locktag,
+												locktag,
 												hashcode,
 												HASH_ENTER_NULL,
 												&found);
@@ -4250,7 +4230,7 @@ lock_twophase_recover(TransactionId xid, uint16 info,
 	 * Find or create a proclock entry with this tag
 	 */
 	proclock = (PROCLOCK *) hash_search_with_hash_value(LockMethodProcLockHash,
-														(void *) &proclocktag,
+														&proclocktag,
 														proclock_hashcode,
 														HASH_ENTER_NULL,
 														&found);
@@ -4267,7 +4247,7 @@ lock_twophase_recover(TransactionId xid, uint16 info,
 			 */
 			Assert(dlist_is_empty(&lock->procLocks));
 			if (!hash_search_with_hash_value(LockMethodLockHash,
-											 (void *) &(lock->tag),
+											 &(lock->tag),
 											 hashcode,
 											 HASH_REMOVE,
 											 NULL))
@@ -4679,7 +4659,7 @@ LockWaiterCount(const LOCKTAG *locktag)
 	LWLockAcquire(partitionLock, LW_EXCLUSIVE);
 
 	lock = (LOCK *) hash_search_with_hash_value(LockMethodLockHash,
-												(const void *) locktag,
+												locktag,
 												hashcode,
 												HASH_FIND,
 												&found);

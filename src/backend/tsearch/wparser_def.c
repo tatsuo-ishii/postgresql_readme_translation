@@ -297,11 +297,10 @@ TParserInit(char *str, int len)
 	 */
 	if (prs->charmaxlen > 1)
 	{
-		Oid			collation = DEFAULT_COLLATION_OID;	/* TODO */
 		pg_locale_t mylocale = 0;	/* TODO */
 
 		prs->usewide = true;
-		if (lc_ctype_is_c(collation))
+		if (database_ctype_is_c)
 		{
 			/*
 			 * char2wchar doesn't work for C-locale and sizeof(pg_wchar) could
@@ -2418,7 +2417,8 @@ mark_hl_fragments(HeadlineParsedText *prs, TSQuery query, List *locations,
 	/* show the first min_words words if we have not marked anything */
 	if (num_f <= 0)
 	{
-		startpos = endpos = curlen = 0;
+		startpos = curlen = 0;
+		endpos = -1;
 		for (i = 0; i < prs->curwords && curlen < min_words; i++)
 		{
 			if (!NONWORDTOKEN(prs->words[i].type))
@@ -2572,7 +2572,7 @@ mark_hl_words(HeadlineParsedText *prs, TSQuery query, List *locations,
 		if (bestlen < 0)
 		{
 			curlen = 0;
-			pose = 0;
+			pose = -1;
 			for (i = 0; i < prs->curwords && curlen < min_words; i++)
 			{
 				if (!NONWORDTOKEN(prs->words[i].type))
@@ -2602,7 +2602,6 @@ prsd_headline(PG_FUNCTION_ARGS)
 	HeadlineParsedText *prs = (HeadlineParsedText *) PG_GETARG_POINTER(0);
 	List	   *prsoptions = (List *) PG_GETARG_POINTER(1);
 	TSQuery		query = PG_GETARG_TSQUERY(2);
-	hlCheck		ch;
 	List	   *locations;
 
 	/* default option values: */
@@ -2672,10 +2671,17 @@ prsd_headline(PG_FUNCTION_ARGS)
 	}
 
 	/* Locate words and phrases matching the query */
-	ch.words = prs->words;
-	ch.len = prs->curwords;
-	locations = TS_execute_locations(GETQUERY(query), &ch, TS_EXEC_EMPTY,
-									 checkcondition_HL);
+	if (query->size > 0)
+	{
+		hlCheck		ch;
+
+		ch.words = prs->words;
+		ch.len = prs->curwords;
+		locations = TS_execute_locations(GETQUERY(query), &ch, TS_EXEC_EMPTY,
+										 checkcondition_HL);
+	}
+	else
+		locations = NIL;		/* empty query matches nothing */
 
 	/* Apply appropriate headline selector */
 	if (max_fragments == 0)

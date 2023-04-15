@@ -101,6 +101,7 @@
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
 #include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "replication/logicallauncher.h"
@@ -628,7 +629,15 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 	}
 
 	if (should_exit)
+	{
+		/*
+		 * Reset the last-start time for this worker so that the launcher will
+		 * restart it without waiting for wal_retrieve_retry_interval.
+		 */
+		ApplyLauncherForgetWorkerStartTime(MySubscription->oid);
+
 		proc_exit(0);
+	}
 }
 
 /*
@@ -1082,6 +1091,7 @@ copy_table(Relation rel)
 	CopyFromState cstate;
 	List	   *attnamelist;
 	ParseState *pstate;
+	List	   *options = NIL;
 
 	/* Get the publisher relation info. */
 	fetch_remote_table_info(get_namespace_name(RelationGetNamespace(rel)),
@@ -1160,6 +1170,19 @@ copy_table(Relation rel)
 
 		appendStringInfoString(&cmd, ") TO STDOUT");
 	}
+
+	/*
+	 * Prior to v16, initial table synchronization will use text format even
+	 * if the binary option is enabled for a subscription.
+	 */
+	if (walrcv_server_version(LogRepWorkerWalRcvConn) >= 160000 &&
+		MySubscription->binary)
+	{
+		appendStringInfoString(&cmd, " WITH (FORMAT binary)");
+		options = list_make1(makeDefElem("format",
+										 (Node *) makeString("binary"), -1));
+	}
+
 	res = walrcv_exec(LogRepWorkerWalRcvConn, cmd.data, 0, NULL);
 	pfree(cmd.data);
 	if (res->status != WALRCV_OK_COPY_OUT)
@@ -1176,7 +1199,7 @@ copy_table(Relation rel)
 										 NULL, false, false);
 
 	attnamelist = make_copy_attnamelist(relmapentry);
-	cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false, copy_read_data, attnamelist, NIL);
+	cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false, copy_read_data, attnamelist, options);
 
 	/* Do the copy */
 	(void) CopyFrom(cstate);
@@ -1229,6 +1252,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	WalRcvExecResult *res;
 	char		originname[NAMEDATALEN];
 	RepOriginId originid;
+	bool		must_use_password;
 
 	/* Check the state of the table synchronization. */
 	StartTransactionCommand();
@@ -1261,13 +1285,19 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 									slotname,
 									NAMEDATALEN);
 
+	/* Is the use of a password mandatory? */
+	must_use_password = MySubscription->passwordrequired &&
+		!superuser_arg(MySubscription->owner);
+
 	/*
 	 * Here we use the slot name instead of the subscription name as the
 	 * application_name, so that it is different from the leader apply worker,
 	 * so that synchronous replication can distinguish them.
 	 */
 	LogRepWorkerWalRcvConn =
-		walrcv_connect(MySubscription->conninfo, true, slotname, &err);
+		walrcv_connect(MySubscription->conninfo, true,
+					   must_use_password,
+					   slotname, &err);
 	if (LogRepWorkerWalRcvConn == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
@@ -1388,17 +1418,10 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 	 * Create a new permanent logical decoding slot. This slot will be used
 	 * for the catchup phase after COPY is done, so tell it to use the
 	 * snapshot to make the final data consistent.
-	 *
-	 * Prevent cancel/die interrupts while creating slot here because it is
-	 * possible that before the server finishes this command, a concurrent
-	 * drop subscription happens which would complete without removing this
-	 * slot leading to a dangling slot on the server.
 	 */
-	HOLD_INTERRUPTS();
 	walrcv_create_slot(LogRepWorkerWalRcvConn,
 					   slotname, false /* permanent */ , false /* two_phase */ ,
 					   CRS_USE_SNAPSHOT, origin_startpos);
-	RESUME_INTERRUPTS();
 
 	/*
 	 * Setup replication origin tracking. The purpose of doing this before the

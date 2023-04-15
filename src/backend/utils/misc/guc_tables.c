@@ -33,6 +33,7 @@
 #include "access/xlog_internal.h"
 #include "access/xlogprefetcher.h"
 #include "access/xlogrecovery.h"
+#include "archive/archive_module.h"
 #include "catalog/namespace.h"
 #include "catalog/storage.h"
 #include "commands/async.h"
@@ -40,9 +41,12 @@
 #include "commands/trigger.h"
 #include "commands/user.h"
 #include "commands/vacuum.h"
+#include "common/scram-common.h"
 #include "jit/jit.h"
 #include "libpq/auth.h"
 #include "libpq/libpq.h"
+#include "libpq/scram.h"
+#include "nodes/queryjumble.h"
 #include "optimizer/cost.h"
 #include "optimizer/geqo.h"
 #include "optimizer/optimizer.h"
@@ -77,7 +81,6 @@
 #include "utils/pg_locale.h"
 #include "utils/portal.h"
 #include "utils/ps_status.h"
-#include "utils/queryjumble.h"
 #include "utils/inval.h"
 #include "utils/xml.h"
 
@@ -160,6 +163,22 @@ static const struct config_enum_entry intervalstyle_options[] = {
 	{"postgres_verbose", INTSTYLE_POSTGRES_VERBOSE, false},
 	{"sql_standard", INTSTYLE_SQL_STANDARD, false},
 	{"iso_8601", INTSTYLE_ISO_8601, false},
+	{NULL, 0, false}
+};
+
+static const struct config_enum_entry icu_validation_level_options[] = {
+	{"disabled", -1, false},
+	{"debug5", DEBUG5, false},
+	{"debug4", DEBUG4, false},
+	{"debug3", DEBUG3, false},
+	{"debug2", DEBUG2, false},
+	{"debug1", DEBUG1, false},
+	{"debug", DEBUG2, true},
+	{"log", LOG, false},
+	{"info", INFO, true},
+	{"notice", NOTICE, false},
+	{"warning", WARNING, false},
+	{"error", ERROR, false},
 	{NULL, 0, false}
 };
 
@@ -360,16 +379,16 @@ static const struct config_enum_entry recovery_prefetch_options[] = {
 	{NULL, 0, false}
 };
 
-static const struct config_enum_entry force_parallel_mode_options[] = {
-	{"off", FORCE_PARALLEL_OFF, false},
-	{"on", FORCE_PARALLEL_ON, false},
-	{"regress", FORCE_PARALLEL_REGRESS, false},
-	{"true", FORCE_PARALLEL_ON, true},
-	{"false", FORCE_PARALLEL_OFF, true},
-	{"yes", FORCE_PARALLEL_ON, true},
-	{"no", FORCE_PARALLEL_OFF, true},
-	{"1", FORCE_PARALLEL_ON, true},
-	{"0", FORCE_PARALLEL_OFF, true},
+static const struct config_enum_entry debug_parallel_query_options[] = {
+	{"off", DEBUG_PARALLEL_OFF, false},
+	{"on", DEBUG_PARALLEL_ON, false},
+	{"regress", DEBUG_PARALLEL_REGRESS, false},
+	{"true", DEBUG_PARALLEL_ON, true},
+	{"false", DEBUG_PARALLEL_OFF, true},
+	{"yes", DEBUG_PARALLEL_ON, true},
+	{"no", DEBUG_PARALLEL_OFF, true},
+	{"1", DEBUG_PARALLEL_ON, true},
+	{"0", DEBUG_PARALLEL_OFF, true},
 	{NULL, 0, false}
 };
 
@@ -395,9 +414,9 @@ static const struct config_enum_entry ssl_protocol_versions_info[] = {
 	{NULL, 0, false}
 };
 
-static const struct config_enum_entry logical_decoding_mode_options[] = {
-	{"buffered", LOGICAL_DECODING_MODE_BUFFERED, false},
-	{"immediate", LOGICAL_DECODING_MODE_IMMEDIATE, false},
+static const struct config_enum_entry logical_replication_mode_options[] = {
+	{"buffered", LOGICAL_REP_MODE_BUFFERED, false},
+	{"immediate", LOGICAL_REP_MODE_IMMEDIATE, false},
 	{NULL, 0, false}
 };
 
@@ -549,6 +568,7 @@ static char *locale_ctype;
 static char *server_encoding_string;
 static char *server_version_string;
 static int	server_version_num;
+static char *io_direct_string;
 
 #ifdef HAVE_SYSLOG
 #define	DEFAULT_SYSLOG_FACILITY LOG_LOCAL0
@@ -1708,6 +1728,16 @@ struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"gss_accept_deleg", PGC_SIGHUP, CONN_AUTH_AUTH,
+			gettext_noop("Sets whether GSSAPI delegation should be accepted from the client."),
+			NULL
+		},
+		&pg_gss_accept_deleg,
+		false,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"escape_string_warning", PGC_USERSET, COMPAT_OPTIONS_PREVIOUS,
 			gettext_noop("Warn about backslash escapes in ordinary string literals."),
 			NULL
@@ -2163,8 +2193,19 @@ struct config_int ConfigureNamesInt[] =
 			gettext_noop("Sets the number of connection slots reserved for superusers."),
 			NULL
 		},
-		&ReservedBackends,
+		&SuperuserReservedConnections,
 		3, 0, MAX_BACKENDS,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"reserved_connections", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
+			gettext_noop("Sets the number of connection slots reserved for roles "
+						 "with privileges of pg_use_reserved_connections."),
+			NULL
+		},
+		&ReservedConnections,
+		0, 0, MAX_BACKENDS,
 		NULL, NULL, NULL
 	},
 
@@ -2192,6 +2233,17 @@ struct config_int ConfigureNamesInt[] =
 		&NBuffers,
 		16384, 16, INT_MAX / 2,
 		NULL, NULL, NULL
+	},
+
+	{
+		{"vacuum_buffer_usage_limit", PGC_USERSET, RESOURCES_MEM,
+			gettext_noop("Sets the buffer pool size for VACUUM, ANALYZE, and autovacuum."),
+			NULL,
+			GUC_UNIT_KB
+		},
+		&VacuumBufferUsageLimit,
+		256, 0, MAX_BAS_VAC_RING_SIZE_KB,
+		check_vacuum_buffer_usage_limit, NULL, NULL
 	},
 
 	{
@@ -2558,9 +2610,9 @@ struct config_int ConfigureNamesInt[] =
 	{
 		{"max_locks_per_transaction", PGC_POSTMASTER, LOCK_MANAGEMENT,
 			gettext_noop("Sets the maximum number of locks per transaction."),
-			gettext_noop("The shared lock table is sized on the assumption that "
-						 "at most max_locks_per_transaction * max_connections distinct "
-						 "objects will need to be locked at any one time.")
+			gettext_noop("The shared lock table is sized on the assumption that at most "
+						 "max_locks_per_transaction objects per server process or prepared "
+						 "transaction will need to be locked at any one time.")
 		},
 		&max_locks_per_xact,
 		64, 10, INT_MAX,
@@ -2571,8 +2623,8 @@ struct config_int ConfigureNamesInt[] =
 		{"max_pred_locks_per_transaction", PGC_POSTMASTER, LOCK_MANAGEMENT,
 			gettext_noop("Sets the maximum number of predicate locks per transaction."),
 			gettext_noop("The shared predicate lock table is sized on the assumption that "
-						 "at most max_pred_locks_per_transaction * max_connections distinct "
-						 "objects will need to be locked at any one time.")
+						 "at most max_pred_locks_per_transaction objects per server process "
+						 "or prepared transaction will need to be locked at any one time.")
 		},
 		&max_predicate_locks_per_xact,
 		64, 10, INT_MAX,
@@ -3453,6 +3505,17 @@ struct config_int ConfigureNamesInt[] =
 		},
 		&log_startup_progress_interval,
 		10000, 0, INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"scram_iterations", PGC_USERSET, CONN_AUTH_AUTH,
+			gettext_noop("Sets the iteration count for SCRAM secret generation."),
+			NULL,
+			GUC_REPORT
+		},
+		&scram_sha_256_iterations,
+		SCRAM_SHA_256_DEFAULT_ITERATIONS, 1, INT_MAX,
 		NULL, NULL, NULL
 	},
 
@@ -4513,6 +4576,17 @@ struct config_string ConfigureNamesString[] =
 		check_backtrace_functions, assign_backtrace_functions, NULL
 	},
 
+	{
+		{"io_direct", PGC_POSTMASTER, DEVELOPER_OPTIONS,
+			gettext_noop("Use direct I/O for file access."),
+			NULL,
+			GUC_LIST_INPUT | GUC_NOT_IN_SAMPLE
+		},
+		&io_direct_string,
+		"",
+		check_io_direct, assign_io_direct, NULL
+	},
+
 	/* End-of-list marker */
 	{
 		{NULL, 0, 0, NULL, NULL}, NULL, NULL, NULL, NULL, NULL
@@ -4615,6 +4689,16 @@ struct config_enum ConfigureNamesEnum[] =
 		},
 		&IntervalStyle,
 		INTSTYLE_POSTGRES, intervalstyle_options,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"icu_validation_level", PGC_USERSET, CLIENT_CONN_LOCALE,
+		 gettext_noop("Log level for reporting invalid ICU locale strings."),
+		 NULL
+		},
+		&icu_validation_level,
+		ERROR, icu_validation_level_options,
 		NULL, NULL, NULL
 	},
 
@@ -4841,13 +4925,15 @@ struct config_enum ConfigureNamesEnum[] =
 	},
 
 	{
-		{"force_parallel_mode", PGC_USERSET, DEVELOPER_OPTIONS,
-			gettext_noop("Forces use of parallel query facilities."),
-			gettext_noop("If possible, run query using a parallel worker and with parallel restrictions."),
+		{"debug_parallel_query", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Forces the planner's use parallel query nodes."),
+			gettext_noop("This can be useful for testing the parallel query infrastructure "
+						 "by forcing the planner to generate plans which contains nodes "
+						 "which perform tuple communication between workers and the main process."),
 			GUC_NOT_IN_SAMPLE | GUC_EXPLAIN
 		},
-		&force_parallel_mode,
-		FORCE_PARALLEL_OFF, force_parallel_mode_options,
+		&debug_parallel_query,
+		DEBUG_PARALLEL_OFF, debug_parallel_query_options,
 		NULL, NULL, NULL
 	},
 
@@ -4908,13 +4994,15 @@ struct config_enum ConfigureNamesEnum[] =
 	},
 
 	{
-		{"logical_decoding_mode", PGC_USERSET, DEVELOPER_OPTIONS,
-			gettext_noop("Allows streaming or serializing each change in logical decoding."),
-			NULL,
+		{"logical_replication_mode", PGC_USERSET, DEVELOPER_OPTIONS,
+			gettext_noop("Controls when to replicate or apply each change."),
+			gettext_noop("On the publisher, it allows streaming or serializing each change in logical decoding. "
+						 "On the subscriber, it allows serialization of all changes to files and notifies the "
+						 "parallel apply workers to read and apply them at the end of the transaction."),
 			GUC_NOT_IN_SAMPLE
 		},
-		&logical_decoding_mode,
-		LOGICAL_DECODING_MODE_BUFFERED, logical_decoding_mode_options,
+		&logical_replication_mode,
+		LOGICAL_REP_MODE_BUFFERED, logical_replication_mode_options,
 		NULL, NULL, NULL
 	},
 

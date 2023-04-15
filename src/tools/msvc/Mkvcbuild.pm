@@ -108,9 +108,11 @@ sub mkvcbuild
 	  pg_strong_random.c pgcheckdir.c pgmkdirp.c pgsleep.c pgstrcasecmp.c
 	  pqsignal.c mkdtemp.c qsort.c qsort_arg.c bsearch_arg.c quotes.c system.c
 	  strerror.c tar.c
+	  win32common.c
 	  win32dlopen.c
 	  win32env.c win32error.c
 	  win32fdatasync.c
+	  win32fseek.c
 	  win32getrusage.c
 	  win32gettimeofday.c
 	  win32link.c
@@ -133,7 +135,7 @@ sub mkvcbuild
 	}
 
 	our @pgcommonallfiles = qw(
-	  base64.c checksum_helper.c compression.c
+	  archive.c base64.c checksum_helper.c compression.c
 	  config_info.c controldata_utils.c d2s.c encnames.c exec.c
 	  f2s.c file_perm.c file_utils.c hashfn.c ip.c jsonapi.c
 	  keywords.c kwlookup.c link-canary.c md5_common.c percentrepl.c
@@ -473,6 +475,11 @@ sub mkvcbuild
 	{
 		push @contrib_excludes, 'sslinfo', 'ssl_passphrase_callback',
 		  'pgcrypto';
+	}
+
+	if (!$solution->{options}->{ldap})
+	{
+		push @contrib_excludes, 'ldap_password_func';
 	}
 
 	if (!$solution->{options}->{uuid})
@@ -856,7 +863,7 @@ sub mkvcbuild
 	# files symlinked on Unix are copied on windows
 	my $pg_waldump = AddSimpleFrontend('pg_waldump');
 	$pg_waldump->AddDefine('FRONTEND');
-	foreach my $xf (glob('src/backend/access/rmgrdesc/*desc.c'))
+	foreach my $xf (glob('src/backend/access/rmgrdesc/*desc*.c'))
 	{
 		$pg_waldump->AddFile($xf);
 	}

@@ -48,13 +48,16 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/interrupt.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
+#include "storage/pmsignal.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
 #include "utils/acl.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/guc_hooks.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/snapmgr.h"
@@ -71,11 +74,29 @@ int			vacuum_multixact_freeze_table_age;
 int			vacuum_failsafe_age;
 int			vacuum_multixact_failsafe_age;
 
+/*
+ * Variables for cost-based vacuum delay. The defaults differ between
+ * autovacuum and vacuum. They should be set with the appropriate GUC value in
+ * vacuum code. They are initialized here to the defaults for client backends
+ * executing VACUUM or ANALYZE.
+ */
+double		vacuum_cost_delay = 0;
+int			vacuum_cost_limit = 200;
 
-/* A few variables that don't seem worth passing around as parameters */
-static MemoryContext vac_context = NULL;
-static BufferAccessStrategy vac_strategy;
-
+/*
+ * VacuumFailsafeActive is a defined as a global so that we can determine
+ * whether or not to re-enable cost-based vacuum delay when vacuuming a table.
+ * If failsafe mode has been engaged, we will not re-enable cost-based delay
+ * for the table until after vacuuming has completed, regardless of other
+ * settings.
+ *
+ * Only VACUUM code should inspect this variable and only table access methods
+ * should set it to true. In Table AM-agnostic VACUUM code, this variable is
+ * inspected to determine whether or not to allow cost-based delays. Table AMs
+ * are free to set it if they desire this behavior, but it is false by default
+ * and reset to false in between vacuuming each relation.
+ */
+bool		VacuumFailsafeActive = false;
 
 /*
  * Variables for cost-based parallel vacuum.  See comments atop
@@ -86,18 +107,39 @@ pg_atomic_uint32 *VacuumActiveNWorkers = NULL;
 int			VacuumCostBalanceLocal = 0;
 
 /* non-export function prototypes */
-static List *expand_vacuum_rel(VacuumRelation *vrel, int options);
-static List *get_all_vacuum_rels(int options);
+static List *expand_vacuum_rel(VacuumRelation *vrel,
+							   MemoryContext vac_context, int options);
+static List *get_all_vacuum_rels(MemoryContext vac_context, int options);
 static void vac_truncate_clog(TransactionId frozenXID,
 							  MultiXactId minMulti,
 							  TransactionId lastSaneFrozenXid,
 							  MultiXactId lastSaneMinMulti);
 static bool vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
-					   bool skip_privs);
+					   bool skip_privs, BufferAccessStrategy bstrategy);
 static double compute_parallel_delay(void);
 static VacOptValue get_vacoptval_from_boolean(DefElem *def);
 static bool vac_tid_reaped(ItemPointer itemptr, void *state);
 static int	vac_cmp_itemptr(const void *left, const void *right);
+
+/*
+ * GUC check function to ensure GUC value specified is within the allowable
+ * range.
+ */
+bool
+check_vacuum_buffer_usage_limit(int *newval, void **extra,
+								GucSource source)
+{
+	/* Value upper and lower hard limits are inclusive */
+	if (*newval == 0 || (*newval >= MIN_BAS_VAC_RING_SIZE_KB &&
+						 *newval <= MAX_BAS_VAC_RING_SIZE_KB))
+		return true;
+
+	/* Value does not fall within any allowable range */
+	GUC_check_errdetail("\"vacuum_buffer_usage_limit\" must be 0 or between %d kB and %d kB",
+						MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB);
+
+	return false;
+}
 
 /*
  * Primary entry point for manual VACUUM and ANALYZE commands
@@ -109,15 +151,19 @@ void
 ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 {
 	VacuumParams params;
+	BufferAccessStrategy bstrategy = NULL;
 	bool		verbose = false;
 	bool		skip_locked = false;
 	bool		analyze = false;
 	bool		freeze = false;
 	bool		full = false;
 	bool		disable_page_skipping = false;
+	bool		process_main = true;
 	bool		process_toast = true;
+	int			ring_size;
 	bool		skip_database_stats = false;
 	bool		only_database_stats = false;
+	MemoryContext vac_context;
 	ListCell   *lc;
 
 	/* index_cleanup and truncate values unspecified for now */
@@ -126,6 +172,12 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 
 	/* By default parallel vacuum is enabled */
 	params.nworkers = 0;
+
+	/*
+	 * Set this to an invalid value so it is clear whether or not a
+	 * BUFFER_USAGE_LIMIT was specified when making the access strategy.
+	 */
+	ring_size = -1;
 
 	/* Parse options list */
 	foreach(lc, vacstmt->options)
@@ -137,6 +189,31 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 			verbose = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "skip_locked") == 0)
 			skip_locked = defGetBoolean(opt);
+		else if (strcmp(opt->defname, "buffer_usage_limit") == 0)
+		{
+			const char *hintmsg;
+			int			result;
+			char	   *vac_buffer_size;
+
+			vac_buffer_size = defGetString(opt);
+
+			/*
+			 * Check that the specified value is valid and the size falls
+			 * within the hard upper and lower limits if it is not 0.
+			 */
+			if (!parse_int(vac_buffer_size, &result, GUC_UNIT_KB, &hintmsg) ||
+				(result != 0 &&
+				 (result < MIN_BAS_VAC_RING_SIZE_KB || result > MAX_BAS_VAC_RING_SIZE_KB)))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("BUFFER_USAGE_LIMIT option must be 0 or between %d kB and %d kB",
+								MIN_BAS_VAC_RING_SIZE_KB, MAX_BAS_VAC_RING_SIZE_KB),
+						 hintmsg ? errhint("%s", _(hintmsg)) : 0));
+			}
+
+			ring_size = result;
+		}
 		else if (!vacstmt->is_vacuumcmd)
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -168,6 +245,8 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 					params.index_cleanup = get_vacoptval_from_boolean(opt);
 			}
 		}
+		else if (strcmp(opt->defname, "process_main") == 0)
+			process_main = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "process_toast") == 0)
 			process_toast = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "truncate") == 0)
@@ -224,6 +303,7 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 		(freeze ? VACOPT_FREEZE : 0) |
 		(full ? VACOPT_FULL : 0) |
 		(disable_page_skipping ? VACOPT_DISABLE_PAGE_SKIPPING : 0) |
+		(process_main ? VACOPT_PROCESS_MAIN : 0) |
 		(process_toast ? VACOPT_PROCESS_TOAST : 0) |
 		(skip_database_stats ? VACOPT_SKIP_DATABASE_STATS : 0) |
 		(only_database_stats ? VACOPT_ONLY_DATABASE_STATS : 0);
@@ -239,6 +319,17 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 				 errmsg("VACUUM FULL cannot be performed in parallel")));
 
 	/*
+	 * BUFFER_USAGE_LIMIT does nothing for VACUUM (FULL) so just raise an
+	 * ERROR for that case.  VACUUM (FULL, ANALYZE) does make use of it, so
+	 * we'll permit that.
+	 */
+	if (ring_size != -1 && (params.options & VACOPT_FULL) &&
+		!(params.options & VACOPT_ANALYZE))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("BUFFER_USAGE_LIMIT cannot be specified for VACUUM FULL")));
+
+	/*
 	 * Make sure VACOPT_ANALYZE is specified if any column lists are present.
 	 */
 	if (!(params.options & VACOPT_ANALYZE))
@@ -252,6 +343,42 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("ANALYZE option must be specified when a column list is provided")));
 		}
+	}
+
+
+	/*
+	 * Sanity check DISABLE_PAGE_SKIPPING option.
+	 */
+	if ((params.options & VACOPT_FULL) != 0 &&
+		(params.options & VACOPT_DISABLE_PAGE_SKIPPING) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL")));
+
+	/* sanity check for PROCESS_TOAST */
+	if ((params.options & VACOPT_FULL) != 0 &&
+		(params.options & VACOPT_PROCESS_TOAST) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("PROCESS_TOAST required with VACUUM FULL")));
+
+	/* sanity check for ONLY_DATABASE_STATS */
+	if (params.options & VACOPT_ONLY_DATABASE_STATS)
+	{
+		Assert(params.options & VACOPT_VACUUM);
+		if (vacstmt->rels != NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("ONLY_DATABASE_STATS cannot be specified with a list of tables")));
+		/* don't require people to turn off PROCESS_TOAST/MAIN explicitly */
+		if (params.options & ~(VACOPT_VACUUM |
+							   VACOPT_VERBOSE |
+							   VACOPT_PROCESS_MAIN |
+							   VACOPT_PROCESS_TOAST |
+							   VACOPT_ONLY_DATABASE_STATS))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")));
 	}
 
 	/*
@@ -279,12 +406,55 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
 	/* user-invoked vacuum uses VACOPT_VERBOSE instead of log_min_duration */
 	params.log_min_duration = -1;
 
+	/*
+	 * Create special memory context for cross-transaction storage.
+	 *
+	 * Since it is a child of PortalContext, it will go away eventually even
+	 * if we suffer an error; there's no need for special abort cleanup logic.
+	 */
+	vac_context = AllocSetContextCreate(PortalContext,
+										"Vacuum",
+										ALLOCSET_DEFAULT_SIZES);
+
+	/*
+	 * Make a buffer strategy object in the cross-transaction memory context.
+	 * We needn't bother making this for VACUUM (FULL) or VACUUM
+	 * (ONLY_DATABASE_STATS) as they'll not make use of it.  VACUUM (FULL,
+	 * ANALYZE) is possible, so we'd better ensure that we make a strategy
+	 * when we see ANALYZE.
+	 */
+	if ((params.options & (VACOPT_ONLY_DATABASE_STATS |
+						   VACOPT_FULL)) == 0 ||
+		(params.options & VACOPT_ANALYZE) != 0)
+	{
+
+		MemoryContext old_context = MemoryContextSwitchTo(vac_context);
+
+		Assert(ring_size >= -1);
+
+		/*
+		 * If BUFFER_USAGE_LIMIT was specified by the VACUUM or ANALYZE
+		 * command, it overrides the value of VacuumBufferUsageLimit.  Either
+		 * value may be 0, in which case GetAccessStrategyWithSize() will
+		 * return NULL, effectively allowing full use of shared buffers.
+		 */
+		if (ring_size == -1)
+			ring_size = VacuumBufferUsageLimit;
+
+		bstrategy = GetAccessStrategyWithSize(BAS_VACUUM, ring_size);
+
+		MemoryContextSwitchTo(old_context);
+	}
+
 	/* Now go through the common routine */
-	vacuum(vacstmt->rels, &params, NULL, isTopLevel);
+	vacuum(vacstmt->rels, &params, bstrategy, vac_context, isTopLevel);
+
+	/* Finally, clean up the vacuum memory context */
+	MemoryContextDelete(vac_context);
 }
 
 /*
- * Internal entry point for VACUUM and ANALYZE commands.
+ * Internal entry point for autovacuum and the VACUUM / ANALYZE commands.
  *
  * relations, if not NIL, is a list of VacuumRelation to process; otherwise,
  * we process all relevant tables in the database.  For each VacuumRelation,
@@ -294,8 +464,11 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
  * params contains a set of parameters that can be used to customize the
  * behavior.
  *
- * bstrategy is normally given as NULL, but in autovacuum it can be passed
- * in to use the same buffer strategy object across multiple vacuum() calls.
+ * bstrategy may be passed in as NULL when the caller does not want to
+ * restrict the number of shared_buffers that VACUUM / ANALYZE can use,
+ * otherwise, the caller must build a BufferAccessStrategy with the number of
+ * shared_buffers that VACUUM / ANALYZE should try to limit themselves to
+ * using.
  *
  * isTopLevel should be passed down from ProcessUtility.
  *
@@ -303,8 +476,8 @@ ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)
  * memory context that will not disappear at transaction commit.
  */
 void
-vacuum(List *relations, VacuumParams *params,
-	   BufferAccessStrategy bstrategy, bool isTopLevel)
+vacuum(List *relations, VacuumParams *params, BufferAccessStrategy bstrategy,
+	   MemoryContext vac_context, bool isTopLevel)
 {
 	static bool in_vacuum = false;
 
@@ -333,72 +506,15 @@ vacuum(List *relations, VacuumParams *params,
 		in_outer_xact = IsInTransactionBlock(isTopLevel);
 
 	/*
-	 * Due to static variables vac_context, anl_context and vac_strategy,
-	 * vacuum() is not reentrant.  This matters when VACUUM FULL or ANALYZE
-	 * calls a hostile index expression that itself calls ANALYZE.
+	 * Check for and disallow recursive calls.  This could happen when VACUUM
+	 * FULL or ANALYZE calls a hostile index expression that itself calls
+	 * ANALYZE.
 	 */
 	if (in_vacuum)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("%s cannot be executed from VACUUM or ANALYZE",
 						stmttype)));
-
-	/*
-	 * Sanity check DISABLE_PAGE_SKIPPING option.
-	 */
-	if ((params->options & VACOPT_FULL) != 0 &&
-		(params->options & VACOPT_DISABLE_PAGE_SKIPPING) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL")));
-
-	/* sanity check for PROCESS_TOAST */
-	if ((params->options & VACOPT_FULL) != 0 &&
-		(params->options & VACOPT_PROCESS_TOAST) == 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("PROCESS_TOAST required with VACUUM FULL")));
-
-	/* sanity check for ONLY_DATABASE_STATS */
-	if (params->options & VACOPT_ONLY_DATABASE_STATS)
-	{
-		Assert(params->options & VACOPT_VACUUM);
-		if (relations != NIL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("ONLY_DATABASE_STATS cannot be specified with a list of tables")));
-		/* don't require people to turn off PROCESS_TOAST explicitly */
-		if (params->options & ~(VACOPT_VACUUM |
-								VACOPT_VERBOSE |
-								VACOPT_PROCESS_TOAST |
-								VACOPT_ONLY_DATABASE_STATS))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("ONLY_DATABASE_STATS cannot be specified with other VACUUM options")));
-	}
-
-	/*
-	 * Create special memory context for cross-transaction storage.
-	 *
-	 * Since it is a child of PortalContext, it will go away eventually even
-	 * if we suffer an error; there's no need for special abort cleanup logic.
-	 */
-	vac_context = AllocSetContextCreate(PortalContext,
-										"Vacuum",
-										ALLOCSET_DEFAULT_SIZES);
-
-	/*
-	 * If caller didn't give us a buffer strategy object, make one in the
-	 * cross-transaction memory context.
-	 */
-	if (bstrategy == NULL)
-	{
-		MemoryContext old_context = MemoryContextSwitchTo(vac_context);
-
-		bstrategy = GetAccessStrategy(BAS_VACUUM);
-		MemoryContextSwitchTo(old_context);
-	}
-	vac_strategy = bstrategy;
 
 	/*
 	 * Build list of relation(s) to process, putting any new data in
@@ -420,7 +536,7 @@ vacuum(List *relations, VacuumParams *params,
 			List	   *sublist;
 			MemoryContext old_context;
 
-			sublist = expand_vacuum_rel(vrel, params->options);
+			sublist = expand_vacuum_rel(vrel, vac_context, params->options);
 			old_context = MemoryContextSwitchTo(vac_context);
 			newrels = list_concat(newrels, sublist);
 			MemoryContextSwitchTo(old_context);
@@ -428,7 +544,7 @@ vacuum(List *relations, VacuumParams *params,
 		relations = newrels;
 	}
 	else
-		relations = get_all_vacuum_rels(params->options);
+		relations = get_all_vacuum_rels(vac_context, params->options);
 
 	/*
 	 * Decide whether we need to start/commit our own transactions.
@@ -485,7 +601,8 @@ vacuum(List *relations, VacuumParams *params,
 		ListCell   *cur;
 
 		in_vacuum = true;
-		VacuumCostActive = (VacuumCostDelay > 0);
+		VacuumFailsafeActive = false;
+		VacuumUpdateCosts();
 		VacuumCostBalance = 0;
 		VacuumPageHit = 0;
 		VacuumPageMiss = 0;
@@ -503,7 +620,8 @@ vacuum(List *relations, VacuumParams *params,
 
 			if (params->options & VACOPT_VACUUM)
 			{
-				if (!vacuum_rel(vrel->oid, vrel->relation, params, false))
+				if (!vacuum_rel(vrel->oid, vrel->relation, params, false,
+								bstrategy))
 					continue;
 			}
 
@@ -521,7 +639,7 @@ vacuum(List *relations, VacuumParams *params,
 				}
 
 				analyze_rel(vrel->oid, vrel->relation, params,
-							vrel->va_cols, in_outer_xact, vac_strategy);
+							vrel->va_cols, in_outer_xact, bstrategy);
 
 				if (use_own_xacts)
 				{
@@ -538,12 +656,20 @@ vacuum(List *relations, VacuumParams *params,
 					CommandCounterIncrement();
 				}
 			}
+
+			/*
+			 * Ensure VacuumFailsafeActive has been reset before vacuuming the
+			 * next relation.
+			 */
+			VacuumFailsafeActive = false;
 		}
 	}
 	PG_FINALLY();
 	{
 		in_vacuum = false;
 		VacuumCostActive = false;
+		VacuumFailsafeActive = false;
+		VacuumCostBalance = 0;
 	}
 	PG_END_TRY();
 
@@ -570,13 +696,6 @@ vacuum(List *relations, VacuumParams *params,
 		vac_update_datfrozenxid();
 	}
 
-	/*
-	 * Clean up working storage --- note we must do this after
-	 * StartTransactionCommand, else we might be trying to delete the active
-	 * context!
-	 */
-	MemoryContextDelete(vac_context);
-	vac_context = NULL;
 }
 
 /*
@@ -754,7 +873,8 @@ vacuum_open_relation(Oid relid, RangeVar *relation, bits32 options,
  * are made in vac_context.
  */
 static List *
-expand_vacuum_rel(VacuumRelation *vrel, int options)
+expand_vacuum_rel(VacuumRelation *vrel, MemoryContext vac_context,
+				  int options)
 {
 	List	   *vacrels = NIL;
 	MemoryContext oldcontext;
@@ -893,7 +1013,7 @@ expand_vacuum_rel(VacuumRelation *vrel, int options)
  * the current database.  The list is built in vac_context.
  */
 static List *
-get_all_vacuum_rels(int options)
+get_all_vacuum_rels(MemoryContext vac_context, int options)
 {
 	List	   *vacrels = NIL;
 	Relation	pgclass;
@@ -1832,7 +1952,8 @@ vac_truncate_clog(TransactionId frozenXID,
  *		At entry and exit, we are not inside a transaction.
  */
 static bool
-vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params, bool skip_privs)
+vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params,
+		   bool skip_privs, BufferAccessStrategy bstrategy)
 {
 	LOCKMODE	lmode;
 	Relation	rel;
@@ -2031,10 +2152,12 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params, bool skip_privs)
 	/*
 	 * Remember the relation's TOAST relation for later, if the caller asked
 	 * us to process it.  In VACUUM FULL, though, the toast table is
-	 * automatically rebuilt by cluster_rel so we shouldn't recurse to it.
+	 * automatically rebuilt by cluster_rel so we shouldn't recurse to it,
+	 * unless PROCESS_MAIN is disabled.
 	 */
 	if ((params->options & VACOPT_PROCESS_TOAST) != 0 &&
-		(params->options & VACOPT_FULL) == 0)
+		((params->options & VACOPT_FULL) == 0 ||
+		 (params->options & VACOPT_PROCESS_MAIN) == 0))
 		toast_relid = rel->rd_rel->reltoastrelid;
 	else
 		toast_relid = InvalidOid;
@@ -2051,24 +2174,33 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params, bool skip_privs)
 	save_nestlevel = NewGUCNestLevel();
 
 	/*
-	 * Do the actual work --- either FULL or "lazy" vacuum
+	 * If PROCESS_MAIN is set (the default), it's time to vacuum the main
+	 * relation.  Otherwise, we can skip this part.  If processing the TOAST
+	 * table is required (e.g., PROCESS_TOAST is set), we force PROCESS_MAIN
+	 * to be set when we recurse to the TOAST table.
 	 */
-	if (params->options & VACOPT_FULL)
+	if (params->options & VACOPT_PROCESS_MAIN)
 	{
-		ClusterParams cluster_params = {0};
+		/*
+		 * Do the actual work --- either FULL or "lazy" vacuum
+		 */
+		if (params->options & VACOPT_FULL)
+		{
+			ClusterParams cluster_params = {0};
 
-		/* close relation before vacuuming, but hold lock until commit */
-		relation_close(rel, NoLock);
-		rel = NULL;
+			/* close relation before vacuuming, but hold lock until commit */
+			relation_close(rel, NoLock);
+			rel = NULL;
 
-		if ((params->options & VACOPT_VERBOSE) != 0)
-			cluster_params.options |= CLUOPT_VERBOSE;
+			if ((params->options & VACOPT_VERBOSE) != 0)
+				cluster_params.options |= CLUOPT_VERBOSE;
 
-		/* VACUUM FULL is now a variant of CLUSTER; see cluster.c */
-		cluster_rel(relid, InvalidOid, &cluster_params);
+			/* VACUUM FULL is now a variant of CLUSTER; see cluster.c */
+			cluster_rel(relid, InvalidOid, &cluster_params);
+		}
+		else
+			table_relation_vacuum(rel, params, bstrategy);
 	}
-	else
-		table_relation_vacuum(rel, params, vac_strategy);
 
 	/* Roll back any GUC changes executed by index functions */
 	AtEOXact_GUC(false, save_nestlevel);
@@ -2094,7 +2226,15 @@ vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params, bool skip_privs)
 	 * totally unimportant for toast relations.
 	 */
 	if (toast_relid != InvalidOid)
-		vacuum_rel(toast_relid, NULL, params, true);
+	{
+		VacuumParams toast_vacuum_params;
+
+		/* force VACOPT_PROCESS_MAIN so vacuum_rel() processes it */
+		memcpy(&toast_vacuum_params, params, sizeof(VacuumParams));
+		toast_vacuum_params.options |= VACOPT_PROCESS_MAIN;
+
+		vacuum_rel(toast_relid, NULL, &toast_vacuum_params, true, bstrategy);
+	}
 
 	/*
 	 * Now release the session-level lock on the main table.
@@ -2190,7 +2330,28 @@ vacuum_delay_point(void)
 	/* Always check for interrupts */
 	CHECK_FOR_INTERRUPTS();
 
-	if (!VacuumCostActive || InterruptPending)
+	if (InterruptPending ||
+		(!VacuumCostActive && !ConfigReloadPending))
+		return;
+
+	/*
+	 * Autovacuum workers should reload the configuration file if requested.
+	 * This allows changes to [autovacuum_]vacuum_cost_limit and
+	 * [autovacuum_]vacuum_cost_delay to take effect while a table is being
+	 * vacuumed or analyzed.
+	 */
+	if (ConfigReloadPending && IsAutoVacuumWorkerProcess())
+	{
+		ConfigReloadPending = false;
+		ProcessConfigFile(PGC_SIGHUP);
+		VacuumUpdateCosts();
+	}
+
+	/*
+	 * If we disabled cost-based delays after reloading the config file,
+	 * return.
+	 */
+	if (!VacuumCostActive)
 		return;
 
 	/*
@@ -2199,25 +2360,39 @@ vacuum_delay_point(void)
 	 */
 	if (VacuumSharedCostBalance != NULL)
 		msec = compute_parallel_delay();
-	else if (VacuumCostBalance >= VacuumCostLimit)
-		msec = VacuumCostDelay * VacuumCostBalance / VacuumCostLimit;
+	else if (VacuumCostBalance >= vacuum_cost_limit)
+		msec = vacuum_cost_delay * VacuumCostBalance / vacuum_cost_limit;
 
 	/* Nap if appropriate */
 	if (msec > 0)
 	{
-		if (msec > VacuumCostDelay * 4)
-			msec = VacuumCostDelay * 4;
+		if (msec > vacuum_cost_delay * 4)
+			msec = vacuum_cost_delay * 4;
 
-		(void) WaitLatch(MyLatch,
-						 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
-						 msec,
-						 WAIT_EVENT_VACUUM_DELAY);
-		ResetLatch(MyLatch);
+		pgstat_report_wait_start(WAIT_EVENT_VACUUM_DELAY);
+		pg_usleep(msec * 1000);
+		pgstat_report_wait_end();
+
+		/*
+		 * We don't want to ignore postmaster death during very long vacuums
+		 * with vacuum_cost_delay configured.  We can't use the usual
+		 * WaitLatch() approach here because we want microsecond-based sleep
+		 * durations above.
+		 */
+		if (IsUnderPostmaster && !PostmasterIsAlive())
+			exit(1);
 
 		VacuumCostBalance = 0;
 
-		/* update balance values for workers */
-		AutoVacuumUpdateDelay();
+		/*
+		 * Balance and update limit values for autovacuum workers. We must do
+		 * this periodically, as the number of workers across which we are
+		 * balancing the limit may have changed.
+		 *
+		 * TODO: There may be better criteria for determining when to do this
+		 * besides "check after napping".
+		 */
+		AutoVacuumUpdateCostLimit();
 
 		/* Might have gotten an interrupt while sleeping */
 		CHECK_FOR_INTERRUPTS();
@@ -2267,11 +2442,11 @@ compute_parallel_delay(void)
 	/* Compute the total local balance for the current worker */
 	VacuumCostBalanceLocal += VacuumCostBalance;
 
-	if ((shared_balance >= VacuumCostLimit) &&
-		(VacuumCostBalanceLocal > 0.5 * ((double) VacuumCostLimit / nworkers)))
+	if ((shared_balance >= vacuum_cost_limit) &&
+		(VacuumCostBalanceLocal > 0.5 * ((double) vacuum_cost_limit / nworkers)))
 	{
 		/* Compute sleep time based on the local cost balance */
-		msec = VacuumCostDelay * VacuumCostBalanceLocal / VacuumCostLimit;
+		msec = vacuum_cost_delay * VacuumCostBalanceLocal / vacuum_cost_limit;
 		pg_atomic_sub_fetch_u32(VacuumSharedCostBalance, VacuumCostBalanceLocal);
 		VacuumCostBalanceLocal = 0;
 	}
@@ -2384,8 +2559,8 @@ vac_tid_reaped(ItemPointer itemptr, void *state)
 	if (item < litem || item > ritem)
 		return false;
 
-	res = (ItemPointer) bsearch((void *) itemptr,
-								(void *) dead_items->items,
+	res = (ItemPointer) bsearch(itemptr,
+								dead_items->items,
 								dead_items->num_items,
 								sizeof(ItemPointerData),
 								vac_cmp_itemptr);

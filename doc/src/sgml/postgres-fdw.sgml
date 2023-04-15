@@ -1,7 +1,9 @@
 <!-- doc/src/sgml/postgres-fdw.sgml -->
 
 <sect1 id="postgres-fdw" xreflabel="postgres_fdw">
- <title>postgres_fdw</title>
+ <title>postgres_fdw &mdash;
+   access data stored in external <productname>PostgreSQL</productname>
+   servers</title>
 
  <indexterm zone="postgres-fdw">
   <primary>postgres_fdw</primary>
@@ -167,9 +169,10 @@
     <literal>sslcert</literal> or <literal>sslkey</literal> settings.
    </para>
    <para>
-    Only superusers may connect to foreign servers without password
-    authentication, so always specify the <literal>password</literal> option
-    for user mappings belonging to non-superusers.
+    Non-superusers may connect to foreign servers using password
+    authentication or with GSSAPI delegated credentials, so specify the
+    <literal>password</literal> option for user mappings belonging to
+    non-superusers where password authentication is required.
    </para>
    <para>
     A superuser may override this check on a per-user-mapping basis by setting
@@ -435,7 +438,11 @@ OPTIONS (ADD password_required 'false');
       </para>
 
       <para>
-       This option also applies when copying into foreign tables.
+       This option also applies when copying into foreign tables.  In that case
+       the actual number of rows <filename>postgres_fdw</filename> copies at
+       once is determined in a similar way to the insert case, but it is
+       limited to at most 1000 due to implementation restrictions of the
+       <command>COPY</command> command.
       </para>
      </listitem>
     </varlistentry>
@@ -504,12 +511,13 @@ OPTIONS (ADD password_required 'false');
     corresponding remote transactions, and subtransactions are managed by
     creating corresponding remote subtransactions. When multiple remote
     transactions are involved in the current local transaction, by default
-    <filename>postgres_fdw</filename> commits those remote transactions
-    serially when the local transaction is committed. When multiple remote
-    subtransactions are involved in the current local subtransaction, by
-    default <filename>postgres_fdw</filename> commits those remote
-    subtransactions serially when the local subtransaction is committed.
-    Performance can be improved with the following option:
+    <filename>postgres_fdw</filename> commits or aborts those remote
+    transactions serially when the local transaction is committed or aborted.
+    When multiple remote subtransactions are involved in the current local
+    subtransaction, by default <filename>postgres_fdw</filename> commits or
+    aborts those remote subtransactions serially when the local subtransaction
+    is committed or aborted.
+    Performance can be improved with the following options:
    </para>
 
    <variablelist>
@@ -518,30 +526,44 @@ OPTIONS (ADD password_required 'false');
      <term><literal>parallel_commit</literal> (<type>boolean</type>)</term>
      <listitem>
       <para>
-       This option controls whether <filename>postgres_fdw</filename> commits
-       in parallel remote transactions opened on a foreign server in a local
+       This option controls whether <filename>postgres_fdw</filename> commits,
+       in parallel, remote transactions opened on a foreign server in a local
        transaction when the local transaction is committed. This setting also
        applies to remote and local subtransactions. This option can only be
        specified for foreign servers, not per-table. The default is
        <literal>false</literal>.
       </para>
+     </listitem>
+    </varlistentry>
 
+    <varlistentry>
+     <term><literal>parallel_abort</literal> (<type>boolean</type>)</term>
+     <listitem>
       <para>
-       If multiple foreign servers with this option enabled are involved in a
-       local transaction, multiple remote transactions on those foreign
-       servers are committed in parallel across those foreign servers when
-       the local transaction is committed.
-      </para>
-
-      <para>
-       When this option is enabled, a foreign server with many remote
-       transactions may see a negative performance impact when the local
-       transaction is committed.
+       This option controls whether <filename>postgres_fdw</filename> aborts
+       in parallel remote transactions opened on a foreign server in a local
+       transaction when the local transaction is aborted. This setting also
+       applies to remote and local subtransactions. This option can only be
+       specified for foreign servers, not per-table. The default is
+       <literal>false</literal>.
       </para>
      </listitem>
     </varlistentry>
 
    </variablelist>
+
+   <para>
+    If multiple foreign servers with these options enabled are involved in a
+    local transaction, multiple remote transactions on those foreign servers
+    are committed or aborted in parallel across those foreign servers when
+    the local transaction is committed or aborted.
+   </para>
+
+   <para>
+    When these options are enabled, a foreign server with many remote
+    transactions may see a negative performance impact when the local
+    transaction is committed or aborted.
+   </para>
 
   </sect3>
 

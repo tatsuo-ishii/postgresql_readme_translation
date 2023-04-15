@@ -16,6 +16,7 @@
 
 #include "access/tupdesc.h"
 #include "access/xlog.h"
+#include "catalog/catalog.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_publication.h"
@@ -156,10 +157,12 @@ typedef struct RelationData
 	List	   *rd_statlist;	/* list of OIDs of extended stats */
 
 	/* data managed by RelationGetIndexAttrBitmap: */
-	Bitmapset  *rd_indexattr;	/* identifies columns used in indexes */
+	bool		rd_attrsvalid;	/* are bitmaps of attrs valid? */
 	Bitmapset  *rd_keyattr;		/* cols that can be ref'd by foreign keys */
 	Bitmapset  *rd_pkattr;		/* cols included in primary key */
 	Bitmapset  *rd_idattr;		/* included in replica identity index */
+	Bitmapset  *rd_hotblockingattr;	/* cols blocking HOT update */
+	Bitmapset  *rd_summarizedattr;	/* cols indexed by summarizing indexes */
 
 	PublicationDesc *rd_pubdesc;	/* publication descriptor, or NULL */
 
@@ -268,7 +271,7 @@ typedef struct RelationData
  */
 typedef struct ForeignKeyCacheInfo
 {
-	pg_node_attr(no_equal, no_read)
+	pg_node_attr(no_equal, no_read, no_query_jumble)
 
 	NodeTag		type;
 	/* oid of the constraint itself */

@@ -186,10 +186,11 @@ typedef struct VacAttrStats
 #define VACOPT_FREEZE 0x08		/* FREEZE option */
 #define VACOPT_FULL 0x10		/* FULL (non-concurrent) vacuum */
 #define VACOPT_SKIP_LOCKED 0x20 /* skip if cannot get lock */
-#define VACOPT_PROCESS_TOAST 0x40	/* process the TOAST table, if any */
-#define VACOPT_DISABLE_PAGE_SKIPPING 0x80	/* don't skip any pages */
-#define VACOPT_SKIP_DATABASE_STATS 0x100	/* skip vac_update_datfrozenxid() */
-#define VACOPT_ONLY_DATABASE_STATS 0x200	/* only vac_update_datfrozenxid() */
+#define VACOPT_PROCESS_MAIN 0x40	/* process main relation */
+#define VACOPT_PROCESS_TOAST 0x80	/* process the TOAST table, if any */
+#define VACOPT_DISABLE_PAGE_SKIPPING 0x100	/* don't skip any pages */
+#define VACOPT_SKIP_DATABASE_STATS 0x200	/* skip vac_update_datfrozenxid() */
+#define VACOPT_ONLY_DATABASE_STATS 0x400	/* only vac_update_datfrozenxid() */
 
 /*
  * Values used by index_cleanup and truncate params.
@@ -212,6 +213,9 @@ typedef enum VacOptValue
  *
  * Note that at least one of VACOPT_VACUUM and VACOPT_ANALYZE must be set
  * in options.
+ *
+ * When adding a new VacuumParam member, consider adding it to vacuumdb as
+ * well.
  */
 typedef struct VacuumParams
 {
@@ -305,11 +309,15 @@ extern PGDLLIMPORT pg_atomic_uint32 *VacuumSharedCostBalance;
 extern PGDLLIMPORT pg_atomic_uint32 *VacuumActiveNWorkers;
 extern PGDLLIMPORT int VacuumCostBalanceLocal;
 
+extern PGDLLIMPORT bool VacuumFailsafeActive;
+extern PGDLLIMPORT double vacuum_cost_delay;
+extern PGDLLIMPORT int vacuum_cost_limit;
 
 /* in commands/vacuum.c */
 extern void ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel);
 extern void vacuum(List *relations, VacuumParams *params,
-				   BufferAccessStrategy bstrategy, bool isTopLevel);
+				   BufferAccessStrategy bstrategy, MemoryContext vac_context,
+				   bool isTopLevel);
 extern void vac_open_indexes(Relation relation, LOCKMODE lockmode,
 							 int *nindexes, Relation **Irel);
 extern void vac_close_indexes(int nindexes, Relation *Irel, LOCKMODE lockmode);
@@ -343,6 +351,10 @@ extern IndexBulkDeleteResult *vac_bulkdel_one_index(IndexVacuumInfo *ivinfo,
 extern IndexBulkDeleteResult *vac_cleanup_one_index(IndexVacuumInfo *ivinfo,
 													IndexBulkDeleteResult *istat);
 extern Size vac_max_items_to_alloc_size(int max_items);
+
+/* In postmaster/autovacuum.c */
+extern void AutoVacuumUpdateCostLimit(void);
+extern void VacuumUpdateCosts(void);
 
 /* in commands/vacuumparallel.c */
 extern ParallelVacuumState *parallel_vacuum_init(Relation rel, Relation *indrels,

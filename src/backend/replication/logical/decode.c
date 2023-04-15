@@ -152,11 +152,39 @@ xlog_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			 * can restart from there.
 			 */
 			break;
+		case XLOG_PARAMETER_CHANGE:
+			{
+				xl_parameter_change *xlrec =
+				(xl_parameter_change *) XLogRecGetData(buf->record);
+
+				/*
+				 * If wal_level on the primary is reduced to less than
+				 * logical, we want to prevent existing logical slots from
+				 * being used.  Existing logical slots on the standby get
+				 * invalidated when this WAL record is replayed; and further,
+				 * slot creation fails when wal_level is not sufficient; but
+				 * all these operations are not synchronized, so a logical
+				 * slot may creep in while the wal_level is being
+				 * reduced. Hence this extra check.
+				 */
+				if (xlrec->wal_level < WAL_LEVEL_LOGICAL)
+				{
+					/*
+					 * This can occur only on a standby, as a primary would
+					 * not allow to restart after changing wal_level < logical
+					 * if there is pre-existing logical slot.
+					 */
+					Assert(RecoveryInProgress());
+					ereport(ERROR,
+							(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							 errmsg("logical decoding on standby requires wal_level >= logical on the primary")));
+				}
+				break;
+			}
 		case XLOG_NOOP:
 		case XLOG_NEXTOID:
 		case XLOG_SWITCH:
 		case XLOG_BACKUP_END:
-		case XLOG_PARAMETER_CHANGE:
 		case XLOG_RESTORE_POINT:
 		case XLOG_FPW_CHANGE:
 		case XLOG_FPI_FOR_HINT:
@@ -564,7 +592,7 @@ logicalmsg_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 	TransactionId xid = XLogRecGetXid(r);
 	uint8		info = XLogRecGetInfo(r) & ~XLR_INFO_MASK;
 	RepOriginId origin_id = XLogRecGetOrigin(r);
-	Snapshot	snapshot;
+	Snapshot	snapshot = NULL;
 	xl_logical_message *message;
 
 	if (info != XLOG_LOGICAL_MESSAGE)
@@ -594,7 +622,17 @@ logicalmsg_decode(LogicalDecodingContext *ctx, XLogRecordBuffer *buf)
 			  SnapBuildXactNeedsSkip(builder, buf->origptr)))
 		return;
 
-	snapshot = SnapBuildGetOrBuildSnapshot(builder);
+	/*
+	 * If this is a non-transactional change, get the snapshot we're expected
+	 * to use. We only get here when the snapshot is consistent, and the
+	 * change is not meant to be skipped.
+	 *
+	 * For transactional changes we don't need a snapshot, we'll use the
+	 * regular snapshot maintained by ReorderBuffer. We just leave it NULL.
+	 */
+	if (!message->transactional)
+		snapshot = SnapBuildGetOrBuildSnapshot(builder);
+
 	ReorderBufferQueueMessage(ctx->reorder, xid, snapshot, buf->endptr,
 							  message->transactional,
 							  message->message, /* first part of message is

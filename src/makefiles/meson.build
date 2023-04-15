@@ -53,7 +53,7 @@ pgxs_kv = {
   'abs_top_srcdir': meson.source_root(),
 
   'enable_thread_safety': 'yes',
-  'enable_rpath': 'yes',
+  'enable_rpath': get_option('rpath') ? 'yes' : 'no',
   'enable_nls': libintl.found() ? 'yes' : 'no',
   'enable_tap_tests': tap_tests_enabled ? 'yes' : 'no',
   'enable_debug': get_option('debug') ? 'yes' : 'no',
@@ -66,7 +66,7 @@ pgxs_kv = {
   'SUN_STUDIO_CC': 'no', # not supported so far
 
   # want the chosen option, rather than the library
-  'with_ssl' : get_option('ssl'),
+  'with_ssl' : ssl_library,
   'with_uuid': uuidopt,
 
   'default_port': get_option('pgport'),

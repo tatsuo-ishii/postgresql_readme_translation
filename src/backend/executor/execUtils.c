@@ -121,6 +121,7 @@ CreateExecutorState(void)
 	estate->es_range_table_size = 0;
 	estate->es_relations = NULL;
 	estate->es_rowmarks = NULL;
+	estate->es_rteperminfos = NIL;
 	estate->es_plannedstmt = NULL;
 	estate->es_part_prune_infos = NIL;
 
@@ -146,6 +147,7 @@ CreateExecutorState(void)
 	estate->es_tupleTable = NIL;
 
 	estate->es_processed = 0;
+	estate->es_total_processed = 0;
 
 	estate->es_top_eflags = 0;
 	estate->es_instrument = 0;
@@ -755,10 +757,13 @@ ExecOpenScanRelation(EState *estate, Index scanrelid, int eflags)
  * indexed by rangetable index.
  */
 void
-ExecInitRangeTable(EState *estate, List *rangeTable)
+ExecInitRangeTable(EState *estate, List *rangeTable, List *permInfos)
 {
 	/* Remember the range table List as-is */
 	estate->es_range_table = rangeTable;
+
+	/* ... and the RTEPermissionInfo List too */
+	estate->es_rteperminfos = permInfos;
 
 	/* Set size of associated arrays */
 	estate->es_range_table_size = list_length(rangeTable);
@@ -877,15 +882,7 @@ UpdateChangedParamSet(PlanState *node, Bitmapset *newchg)
 	 * include anything else into its chgParam set.
 	 */
 	parmset = bms_intersect(node->plan->allParam, newchg);
-
-	/*
-	 * Keep node->chgParam == NULL if there's not actually any members; this
-	 * allows the simplest possible tests in executor node files.
-	 */
-	if (!bms_is_empty(parmset))
-		node->chgParam = bms_join(node->chgParam, parmset);
-	else
-		bms_free(parmset);
+	node->chgParam = bms_join(node->chgParam, parmset);
 }
 
 /*
@@ -1343,8 +1340,8 @@ ExecGetUpdatedCols(ResultRelInfo *relinfo, EState *estate)
 Bitmapset *
 ExecGetExtraUpdatedCols(ResultRelInfo *relinfo, EState *estate)
 {
-	/* In some code paths we can reach here before initializing the info */
-	if (relinfo->ri_GeneratedExprs == NULL)
+	/* Compute the info if we didn't already */
+	if (relinfo->ri_GeneratedExprsU == NULL)
 		ExecInitStoredGenerated(relinfo, estate, CMD_UPDATE);
 	return relinfo->ri_extraUpdatedCols;
 }

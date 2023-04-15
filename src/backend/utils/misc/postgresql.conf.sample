@@ -63,6 +63,7 @@
 					# (change requires restart)
 #port = 5432				# (change requires restart)
 #max_connections = 100			# (change requires restart)
+#reserved_connections = 0		# (change requires restart)
 #superuser_reserved_connections = 3	# (change requires restart)
 #unix_socket_directories = '/tmp'	# comma-separated list of directories
 					# (change requires restart)
@@ -94,11 +95,13 @@
 
 #authentication_timeout = 1min		# 1s-600s
 #password_encryption = scram-sha-256	# scram-sha-256 or md5
+#scram_iterations = 4096
 #db_user_namespace = off
 
 # GSSAPI using Kerberos
 #krb_server_keyfile = 'FILE:${sysconfdir}/krb5.keytab'
 #krb_caseins_users = off
+#gss_accept_deleg = off
 
 # - SSL -
 
@@ -155,6 +158,9 @@
 					#   mmap
 					# (change requires restart)
 #min_dynamic_shared_memory = 0MB	# (change requires restart)
+#vacuum_buffer_usage_limit = 256 # size of vacuum and analyze buffer access strategy ring.
+				 # 0 to disable vacuum buffer access strategy
+				 # range 128kB to 16GB
 
 # - Disk -
 
@@ -728,6 +734,9 @@
 #lc_monetary = 'C'			# locale for monetary formatting
 #lc_numeric = 'C'			# locale for number formatting
 #lc_time = 'C'				# locale for time formatting
+
+#icu_validation_level = ERROR		# report ICU locale validation
+					# errors at the given level
 
 # default configuration for text search
 #default_text_search_config = 'pg_catalog.simple'

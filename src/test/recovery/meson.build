@@ -17,7 +17,6 @@ tests += {
       't/008_fsm_truncation.pl',
       't/009_twophase.pl',
       't/010_logical_decoding_timelines.pl',
-      't/011_crash_recovery.pl',
       't/012_subtransactions.pl',
       't/013_crash_restart.pl',
       't/014_unlogged_reinit.pl',
@@ -40,6 +39,9 @@ tests += {
       't/031_recovery_conflict.pl',
       't/032_relfilenode_reuse.pl',
       't/033_replay_tsp_drops.pl',
+      't/034_create_database.pl',
+      't/035_standby_logical_decoding.pl',
+      't/036_truncated_dropped.pl',
     ],
   },
 }

@@ -51,6 +51,8 @@
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
+#include "utils/json.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -382,6 +384,33 @@ contain_mutable_functions_walker(Node *node, void *context)
 	if (check_functions_in_node(node, contain_mutable_functions_checker,
 								context))
 		return true;
+
+	if (IsA(node, JsonConstructorExpr))
+	{
+		const JsonConstructorExpr *ctor = (JsonConstructorExpr *) node;
+		ListCell   *lc;
+		bool		is_jsonb;
+
+		is_jsonb = ctor->returning->format->format_type == JS_FORMAT_JSONB;
+
+		/*
+		 * Check argument_type => json[b] conversions specifically.  We still
+		 * recurse to check 'args' below, but here we want to specifically
+		 * check whether or not the emitted clause would fail to be immutable
+		 * because of TimeZone, for example.
+		 */
+		foreach(lc, ctor->args)
+		{
+			Oid			typid = exprType(lfirst(lc));
+
+			if (is_jsonb ?
+				!to_jsonb_is_immutable(typid) :
+				!to_json_is_immutable(typid))
+				return true;
+		}
+
+		/* Check all subnodes */
+	}
 
 	if (IsA(node, NextValueExpr))
 	{
@@ -2004,14 +2033,16 @@ is_pseudo_constant_clause_relids(Node *clause, Relids relids)
  * NumRelids
  *		(formerly clause_relids)
  *
- * Returns the number of different relations referenced in 'clause'.
+ * Returns the number of different base relations referenced in 'clause'.
  */
 int
 NumRelids(PlannerInfo *root, Node *clause)
 {
+	int			result;
 	Relids		varnos = pull_varnos(root, clause);
-	int			result = bms_num_members(varnos);
 
+	varnos = bms_del_members(varnos, root->outer_join_rels);
+	result = bms_num_members(varnos);
 	bms_free(varnos);
 	return result;
 }
@@ -2784,6 +2815,32 @@ eval_const_expressions_mutator(Node *node,
 				}
 				break;
 			}
+
+		case T_JsonValueExpr:
+			{
+				JsonValueExpr *jve = (JsonValueExpr *) node;
+				Node	   *raw;
+
+				raw = eval_const_expressions_mutator((Node *) jve->raw_expr,
+													 context);
+				if (raw && IsA(raw, Const))
+				{
+					Node	   *formatted;
+					Node	   *save_case_val = context->case_val;
+
+					context->case_val = raw;
+
+					formatted = eval_const_expressions_mutator((Node *) jve->formatted_expr,
+															   context);
+
+					context->case_val = save_case_val;
+
+					if (formatted && IsA(formatted, Const))
+						return formatted;
+				}
+				break;
+			}
+
 		case T_SubPlan:
 		case T_AlternativeSubPlan:
 
@@ -4175,15 +4232,10 @@ fetch_function_defaults(HeapTuple func_tuple)
 {
 	List	   *defaults;
 	Datum		proargdefaults;
-	bool		isnull;
 	char	   *str;
 
-	/* The error cases here shouldn't happen, but check anyway */
-	proargdefaults = SysCacheGetAttr(PROCOID, func_tuple,
-									 Anum_pg_proc_proargdefaults,
-									 &isnull);
-	if (isnull)
-		elog(ERROR, "not enough default arguments");
+	proargdefaults = SysCacheGetAttrNotNull(PROCOID, func_tuple,
+											Anum_pg_proc_proargdefaults);
 	str = TextDatumGetCString(proargdefaults);
 	defaults = castNode(List, stringToNode(str));
 	pfree(str);
@@ -4455,12 +4507,7 @@ inline_function(Oid funcid, Oid result_type, Oid result_collid,
 	fexpr->location = -1;
 
 	/* Fetch the function body */
-	tmp = SysCacheGetAttr(PROCOID,
-						  func_tuple,
-						  Anum_pg_proc_prosrc,
-						  &isNull);
-	if (isNull)
-		elog(ERROR, "null prosrc for function %u", funcid);
+	tmp = SysCacheGetAttrNotNull(PROCOID, func_tuple, Anum_pg_proc_prosrc);
 	src = TextDatumGetCString(tmp);
 
 	/*
@@ -5013,12 +5060,7 @@ inline_set_returning_function(PlannerInfo *root, RangeTblEntry *rte)
 	oldcxt = MemoryContextSwitchTo(mycxt);
 
 	/* Fetch the function body */
-	tmp = SysCacheGetAttr(PROCOID,
-						  func_tuple,
-						  Anum_pg_proc_prosrc,
-						  &isNull);
-	if (isNull)
-		elog(ERROR, "null prosrc for function %u", func_oid);
+	tmp = SysCacheGetAttrNotNull(PROCOID, func_tuple, Anum_pg_proc_prosrc);
 	src = TextDatumGetCString(tmp);
 
 	/*

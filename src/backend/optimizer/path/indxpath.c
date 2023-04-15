@@ -949,9 +949,6 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 
 	/* We do not want the index's rel itself listed in outer_relids */
 	outer_relids = bms_del_member(outer_relids, rel->relid);
-	/* Enforce convention that outer_relids is exactly NULL if empty */
-	if (bms_is_empty(outer_relids))
-		outer_relids = NULL;
 
 	/* Compute loop_count for cost estimation purposes */
 	loop_count = get_loop_count(root, rel->relid, outer_relids);
@@ -1015,9 +1012,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 								  orderbyclauses,
 								  orderbyclausecols,
 								  useful_pathkeys,
-								  index_is_ordered ?
-								  ForwardScanDirection :
-								  NoMovementScanDirection,
+								  ForwardScanDirection,
 								  index_only_scan,
 								  outer_relids,
 								  loop_count,
@@ -1037,9 +1032,7 @@ build_index_paths(PlannerInfo *root, RelOptInfo *rel,
 									  orderbyclauses,
 									  orderbyclausecols,
 									  useful_pathkeys,
-									  index_is_ordered ?
-									  ForwardScanDirection :
-									  NoMovementScanDirection,
+									  ForwardScanDirection,
 									  index_only_scan,
 									  outer_relids,
 									  loop_count,
@@ -3352,13 +3345,16 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 	 * Add on any equivalence-derivable join clauses.  Computing the correct
 	 * relid sets for generate_join_implied_equalities is slightly tricky
 	 * because the rel could be a child rel rather than a true baserel, and in
-	 * that case we must remove its parents' relid(s) from all_baserels.
+	 * that case we must subtract its parents' relid(s) from all_query_rels.
+	 * Additionally, we mustn't consider clauses that are only computable
+	 * after outer joins that can null the rel.
 	 */
 	if (rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
-		otherrels = bms_difference(root->all_baserels,
+		otherrels = bms_difference(root->all_query_rels,
 								   find_childrel_parents(root, rel));
 	else
-		otherrels = bms_difference(root->all_baserels, rel->relids);
+		otherrels = bms_difference(root->all_query_rels, rel->relids);
+	otherrels = bms_del_members(otherrels, rel->nulling_relids);
 
 	if (!bms_is_empty(otherrels))
 		clauselist =
@@ -3367,7 +3363,8 @@ check_index_predicates(PlannerInfo *root, RelOptInfo *rel)
 														 bms_union(rel->relids,
 																   otherrels),
 														 otherrels,
-														 rel));
+														 rel,
+														 0));
 
 	/*
 	 * Normally we remove quals that are implied by a partial index's
@@ -3736,7 +3733,8 @@ match_index_to_operand(Node *operand,
 		 */
 		if (operand && IsA(operand, Var) &&
 			index->rel->relid == ((Var *) operand)->varno &&
-			indkey == ((Var *) operand)->varattno)
+			indkey == ((Var *) operand)->varattno &&
+			((Var *) operand)->varnullingrels == NULL)
 			return true;
 	}
 	else

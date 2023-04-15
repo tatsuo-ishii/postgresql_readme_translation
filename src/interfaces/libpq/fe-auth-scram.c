@@ -282,6 +282,7 @@ scram_exchange(void *opaq, char *input, int inputlen,
 			}
 			*done = true;
 			state->state = FE_SCRAM_FINISHED;
+			state->conn->client_finished_auth = true;
 			break;
 
 		default:
@@ -716,7 +717,7 @@ read_server_final_message(fe_scram_state *state, char *input)
 			return false;
 		}
 		libpq_append_conn_error(conn, "error received from server in SCRAM exchange: %s",
-						   errmsg);
+								errmsg);
 		return false;
 	}
 
@@ -894,7 +895,7 @@ verify_server_signature(fe_scram_state *state, bool *match,
  * error details.
  */
 char *
-pg_fe_scram_build_secret(const char *password, const char **errstr)
+pg_fe_scram_build_secret(const char *password, int iterations, const char **errstr)
 {
 	char	   *prep_password;
 	pg_saslprep_rc rc;
@@ -926,7 +927,7 @@ pg_fe_scram_build_secret(const char *password, const char **errstr)
 
 	result = scram_build_secret(PG_SHA256, SCRAM_SHA_256_KEY_LEN, saltbuf,
 								SCRAM_DEFAULT_SALT_LEN,
-								SCRAM_DEFAULT_ITERATIONS, password,
+								iterations, password,
 								errstr);
 
 	free(prep_password);

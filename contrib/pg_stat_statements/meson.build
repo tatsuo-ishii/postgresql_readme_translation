@@ -40,7 +40,15 @@ tests += {
   'bd': meson.current_build_dir(),
   'regress': {
     'sql': [
-      'pg_stat_statements',
+      'select',
+      'dml',
+      'cursors',
+      'utility',
+      'level_tracking',
+      'planning',
+      'user_activity',
+      'wal',
+      'cleanup',
       'oldextversions',
     ],
     'regress_args': ['--temp-config', files('pg_stat_statements.conf')],

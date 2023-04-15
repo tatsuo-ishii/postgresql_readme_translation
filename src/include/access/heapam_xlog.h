@@ -245,10 +245,12 @@ typedef struct xl_heap_prune
 	TransactionId snapshotConflictHorizon;
 	uint16		nredirected;
 	uint16		ndead;
+	bool		isCatalogRel;	/* to handle recovery conflict during logical
+								 * decoding on standby */
 	/* OFFSET NUMBERS are in the block reference 0 */
 } xl_heap_prune;
 
-#define SizeOfHeapPrune (offsetof(xl_heap_prune, ndead) + sizeof(uint16))
+#define SizeOfHeapPrune (offsetof(xl_heap_prune, isCatalogRel) + sizeof(bool))
 
 /*
  * The vacuum page record is similar to the prune record, but can only mark
@@ -277,13 +279,13 @@ typedef struct xl_heap_vacuum
 /* This is what we need to know about lock */
 typedef struct xl_heap_lock
 {
-	TransactionId locking_xid;	/* might be a MultiXactId not xid */
+	TransactionId xmax;			/* might be a MultiXactId */
 	OffsetNumber offnum;		/* locked tuple's offset on page */
-	int8		infobits_set;	/* infomask and infomask2 bits to set */
+	uint8		infobits_set;	/* infomask and infomask2 bits to set */
 	uint8		flags;			/* XLH_LOCK_* flag bits */
 } xl_heap_lock;
 
-#define SizeOfHeapLock	(offsetof(xl_heap_lock, flags) + sizeof(int8))
+#define SizeOfHeapLock	(offsetof(xl_heap_lock, flags) + sizeof(uint8))
 
 /* This is what we need to know about locking an updated version of a row */
 typedef struct xl_heap_lock_updated
@@ -344,12 +346,15 @@ typedef struct xl_heap_freeze_page
 {
 	TransactionId snapshotConflictHorizon;
 	uint16		nplans;
+	bool		isCatalogRel;	/* to handle recovery conflict during logical
+								 * decoding on standby */
 
-	/* FREEZE PLANS FOLLOW */
-	/* OFFSET NUMBER ARRAY FOLLOWS */
+	/*
+	 * In payload of blk 0 : FREEZE PLANS and OFFSET NUMBER ARRAY
+	 */
 } xl_heap_freeze_page;
 
-#define SizeOfHeapFreezePage (offsetof(xl_heap_freeze_page, nplans) + sizeof(uint16))
+#define SizeOfHeapFreezePage	(offsetof(xl_heap_freeze_page, isCatalogRel) + sizeof(bool))
 
 /*
  * This is what we need to know about setting a visibility map bit
@@ -408,7 +413,7 @@ extern void heap2_desc(StringInfo buf, XLogReaderState *record);
 extern const char *heap2_identify(uint8 info);
 extern void heap_xlog_logical_rewrite(XLogReaderState *r);
 
-extern XLogRecPtr log_heap_visible(RelFileLocator rlocator, Buffer heap_buffer,
+extern XLogRecPtr log_heap_visible(Relation rel, Buffer heap_buffer,
 								   Buffer vm_buffer,
 								   TransactionId snapshotConflictHorizon,
 								   uint8 vmflags);

@@ -1,3 +1,5 @@
+# Copyright (c) 2022-2023, PostgreSQL Global Development Group
+
 # Set of tests for pg_upgrade, including cross-version checks.
 use strict;
 use warnings;
@@ -90,14 +92,57 @@ my $oldnode =
   PostgreSQL::Test::Cluster->new('old_node',
 	install_path => $ENV{oldinstall});
 
+my %node_params = ();
+
 # To increase coverage of non-standard segment size and group access without
 # increasing test runtime, run these tests with a custom setting.
 # --allow-group-access and --wal-segsize have been added in v11.
-my %node_params = ();
-$node_params{extra} = [ '--wal-segsize', '1', '--allow-group-access' ]
-  if $oldnode->pg_version >= 11;
+my @custom_opts = ();
+if ($oldnode->pg_version >= 11)
+{
+	push @custom_opts, ('--wal-segsize', '1');
+	push @custom_opts, '--allow-group-access';
+}
+
+# Set up the locale settings for the original cluster, so that we
+# can test that pg_upgrade copies the locale settings of template0
+# from the old to the new cluster.
+
+my $original_encoding = "6"; # UTF-8
+my $original_provider = "c";
+my $original_locale = "C";
+my $original_iculocale = "";
+my $provider_field = "'c' AS datlocprovider";
+my $iculocale_field = "NULL AS daticulocale";
+if ($oldnode->pg_version >= 15 && $ENV{with_icu} eq 'yes')
+{
+	$provider_field = "datlocprovider";
+	$iculocale_field = "daticulocale";
+	$original_provider = "i";
+	$original_iculocale = "fr-CA";
+}
+
+my @initdb_params = @custom_opts;
+
+push @initdb_params, ('--encoding', 'UTF-8');
+push @initdb_params, ('--locale', $original_locale);
+if ($original_provider eq "i")
+{
+	push @initdb_params, ('--locale-provider', 'icu');
+	push @initdb_params, ('--icu-locale', 'fr-CA');
+}
+
+$node_params{extra} = \@initdb_params;
 $oldnode->init(%node_params);
 $oldnode->start;
+
+my $result;
+$result = $oldnode->safe_psql(
+	'postgres', "SELECT encoding, $provider_field, datcollate, datctype, $iculocale_field
+                 FROM pg_database WHERE datname='template0'");
+is($result, "$original_encoding|$original_provider|$original_locale|$original_locale|$original_iculocale",
+		"check locales in original cluster"
+	);
 
 # The default location of the source code is the root of this directory.
 my $srcdir = abs_path("../../..");
@@ -168,6 +213,17 @@ else
 
 # Initialize a new node for the upgrade.
 my $newnode = PostgreSQL::Test::Cluster->new('new_node');
+
+# Reset to original parameters.
+@initdb_params = @custom_opts;
+
+# The new cluster will be initialized with different locale settings,
+# but these settings will be overwritten with those of the original
+# cluster.
+push @initdb_params, ('--encoding', 'SQL_ASCII');
+push @initdb_params, ('--locale-provider', 'libc');
+
+$node_params{extra} = \@initdb_params;
 $newnode->init(%node_params);
 
 my $newbindir = $newnode->config_data('--bindir');
@@ -337,6 +393,14 @@ if (-d $log_path)
 		print "=== EOF ===\n";
 	}
 }
+
+# Test that upgraded cluster has original locale settings.
+$result = $newnode->safe_psql(
+	'postgres', "SELECT encoding, $provider_field, datcollate, datctype, $iculocale_field
+                 FROM pg_database WHERE datname='template0'");
+is($result, "$original_encoding|$original_provider|$original_locale|$original_locale|$original_iculocale",
+		"check that locales in new cluster match original cluster"
+	);
 
 # Second dump from the upgraded instance.
 @dump_command = (

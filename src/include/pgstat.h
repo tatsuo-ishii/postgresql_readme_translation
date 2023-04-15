@@ -48,6 +48,7 @@ typedef enum PgStat_Kind
 	PGSTAT_KIND_ARCHIVER,
 	PGSTAT_KIND_BGWRITER,
 	PGSTAT_KIND_CHECKPOINTER,
+	PGSTAT_KIND_IO,
 	PGSTAT_KIND_SLRU,
 	PGSTAT_KIND_WAL,
 } PgStat_Kind;
@@ -105,19 +106,10 @@ typedef int64 PgStat_Counter;
  */
 typedef struct PgStat_FunctionCounts
 {
-	PgStat_Counter f_numcalls;
-	instr_time	f_total_time;
-	instr_time	f_self_time;
+	PgStat_Counter numcalls;
+	instr_time	total_time;
+	instr_time	self_time;
 } PgStat_FunctionCounts;
-
-/* ----------
- * PgStat_BackendFunctionEntry	Non-flushed function stats.
- * ----------
- */
-typedef struct PgStat_BackendFunctionEntry
-{
-	PgStat_FunctionCounts f_counts;
-} PgStat_BackendFunctionEntry;
 
 /*
  * Working state needed to accumulate per-function-call timing statistics.
@@ -132,7 +124,7 @@ typedef struct PgStat_FunctionCallUsage
 	/* Backend-wide total time as of function start */
 	instr_time	save_total;
 	/* system clock as of function start */
-	instr_time	f_start;
+	instr_time	start;
 } PgStat_FunctionCallUsage;
 
 /* ----------
@@ -159,31 +151,32 @@ typedef struct PgStat_BackendSubEntry
  * the index AM, while tuples_fetched is the number of tuples successfully
  * fetched by heap_fetch under the control of simple indexscans for this index.
  *
- * tuples_inserted/updated/deleted/hot_updated count attempted actions,
- * regardless of whether the transaction committed.  delta_live_tuples,
+ * tuples_inserted/updated/deleted/hot_updated/newpage_updated count attempted
+ * actions, regardless of whether the transaction committed.  delta_live_tuples,
  * delta_dead_tuples, and changed_tuples are set depending on commit or abort.
  * Note that delta_live_tuples and delta_dead_tuples can be negative!
  * ----------
  */
 typedef struct PgStat_TableCounts
 {
-	PgStat_Counter t_numscans;
+	PgStat_Counter numscans;
 
-	PgStat_Counter t_tuples_returned;
-	PgStat_Counter t_tuples_fetched;
+	PgStat_Counter tuples_returned;
+	PgStat_Counter tuples_fetched;
 
-	PgStat_Counter t_tuples_inserted;
-	PgStat_Counter t_tuples_updated;
-	PgStat_Counter t_tuples_deleted;
-	PgStat_Counter t_tuples_hot_updated;
-	bool		t_truncdropped;
+	PgStat_Counter tuples_inserted;
+	PgStat_Counter tuples_updated;
+	PgStat_Counter tuples_deleted;
+	PgStat_Counter tuples_hot_updated;
+	PgStat_Counter tuples_newpage_updated;
+	bool		truncdropped;
 
-	PgStat_Counter t_delta_live_tuples;
-	PgStat_Counter t_delta_dead_tuples;
-	PgStat_Counter t_changed_tuples;
+	PgStat_Counter delta_live_tuples;
+	PgStat_Counter delta_dead_tuples;
+	PgStat_Counter changed_tuples;
 
-	PgStat_Counter t_blocks_fetched;
-	PgStat_Counter t_blocks_hit;
+	PgStat_Counter blocks_fetched;
+	PgStat_Counter blocks_hit;
 } PgStat_TableCounts;
 
 /* ----------
@@ -203,10 +196,10 @@ typedef struct PgStat_TableCounts
  */
 typedef struct PgStat_TableStatus
 {
-	Oid			t_id;			/* table's OID */
-	bool		t_shared;		/* is it a shared catalog? */
+	Oid			id;				/* table's OID */
+	bool		shared;			/* is it a shared catalog? */
 	struct PgStat_TableXactStatus *trans;	/* lowest subxact's counts */
-	PgStat_TableCounts t_counts;	/* event counts to be sent */
+	PgStat_TableCounts counts;	/* event counts to be sent */
 	Relation	relation;		/* rel that is using this entry */
 } PgStat_TableStatus;
 
@@ -242,7 +235,7 @@ typedef struct PgStat_TableXactStatus
  * ------------------------------------------------------------
  */
 
-#define PGSTAT_FILE_FORMAT_ID	0x01A5BCA9
+#define PGSTAT_FILE_FORMAT_ID	0x01A5BCAC
 
 typedef struct PgStat_ArchiverStats
 {
@@ -276,6 +269,54 @@ typedef struct PgStat_CheckpointerStats
 	PgStat_Counter buf_fsync_backend;
 } PgStat_CheckpointerStats;
 
+
+/*
+ * Types related to counting IO operations
+ */
+typedef enum IOObject
+{
+	IOOBJECT_RELATION,
+	IOOBJECT_TEMP_RELATION,
+} IOObject;
+
+#define IOOBJECT_NUM_TYPES (IOOBJECT_TEMP_RELATION + 1)
+
+typedef enum IOContext
+{
+	IOCONTEXT_BULKREAD,
+	IOCONTEXT_BULKWRITE,
+	IOCONTEXT_NORMAL,
+	IOCONTEXT_VACUUM,
+} IOContext;
+
+#define IOCONTEXT_NUM_TYPES (IOCONTEXT_VACUUM + 1)
+
+typedef enum IOOp
+{
+	IOOP_EVICT,
+	IOOP_EXTEND,
+	IOOP_FSYNC,
+	IOOP_HIT,
+	IOOP_READ,
+	IOOP_REUSE,
+	IOOP_WRITE,
+} IOOp;
+
+#define IOOP_NUM_TYPES (IOOP_WRITE + 1)
+
+typedef struct PgStat_BktypeIO
+{
+	PgStat_Counter counts[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+	PgStat_Counter times[IOOBJECT_NUM_TYPES][IOCONTEXT_NUM_TYPES][IOOP_NUM_TYPES];
+} PgStat_BktypeIO;
+
+typedef struct PgStat_IO
+{
+	TimestampTz stat_reset_timestamp;
+	PgStat_BktypeIO stats[BACKEND_NUM_TYPES];
+} PgStat_IO;
+
+
 typedef struct PgStat_StatDBEntry
 {
 	PgStat_Counter xact_commit;
@@ -291,6 +332,7 @@ typedef struct PgStat_StatDBEntry
 	PgStat_Counter conflict_tablespace;
 	PgStat_Counter conflict_lock;
 	PgStat_Counter conflict_snapshot;
+	PgStat_Counter conflict_logicalslot;
 	PgStat_Counter conflict_bufferpin;
 	PgStat_Counter conflict_startup_deadlock;
 	PgStat_Counter temp_files;
@@ -313,10 +355,10 @@ typedef struct PgStat_StatDBEntry
 
 typedef struct PgStat_StatFuncEntry
 {
-	PgStat_Counter f_numcalls;
+	PgStat_Counter numcalls;
 
-	PgStat_Counter f_total_time;	/* times in microseconds */
-	PgStat_Counter f_self_time;
+	PgStat_Counter total_time;	/* times in microseconds */
+	PgStat_Counter self_time;
 } PgStat_StatFuncEntry;
 
 typedef struct PgStat_StatReplSlotEntry
@@ -363,6 +405,7 @@ typedef struct PgStat_StatTabEntry
 	PgStat_Counter tuples_updated;
 	PgStat_Counter tuples_deleted;
 	PgStat_Counter tuples_hot_updated;
+	PgStat_Counter tuples_newpage_updated;
 
 	PgStat_Counter live_tuples;
 	PgStat_Counter dead_tuples;
@@ -394,6 +437,21 @@ typedef struct PgStat_WalStats
 	PgStat_Counter wal_sync_time;
 	TimestampTz stat_reset_timestamp;
 } PgStat_WalStats;
+
+/*
+ * This struct stores wal-related durations as instr_time, which makes it
+ * cheaper and easier to accumulate them, by not requiring type
+ * conversions. During stats flush instr_time will be converted into
+ * microseconds.
+ */
+typedef struct PgStat_PendingWalStats
+{
+	PgStat_Counter wal_buffers_full;
+	PgStat_Counter wal_write;
+	PgStat_Counter wal_sync;
+	instr_time	wal_write_time;
+	instr_time	wal_sync_time;
+} PgStat_PendingWalStats;
 
 
 /*
@@ -454,6 +512,29 @@ extern PgStat_CheckpointerStats *pgstat_fetch_stat_checkpointer(void);
 
 
 /*
+ * Functions in pgstat_io.c
+ */
+
+extern bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
+										 BackendType bktype);
+extern void pgstat_count_io_op(IOObject io_object, IOContext io_context, IOOp io_op);
+extern void pgstat_count_io_op_n(IOObject io_object, IOContext io_context, IOOp io_op, uint32 cnt);
+extern instr_time pgstat_prepare_io_time(void);
+extern void pgstat_count_io_op_time(IOObject io_object, IOContext io_context,
+									IOOp io_op, instr_time start_time, uint32 cnt);
+
+extern PgStat_IO *pgstat_fetch_stat_io(void);
+extern const char *pgstat_get_io_context_name(IOContext io_context);
+extern const char *pgstat_get_io_object_name(IOObject io_object);
+
+extern bool pgstat_tracks_io_bktype(BackendType bktype);
+extern bool pgstat_tracks_io_object(BackendType bktype,
+									IOObject io_object, IOContext io_context);
+extern bool pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
+								IOContext io_context, IOOp io_op);
+
+
+/*
  * Functions in pgstat_database.c
  */
 
@@ -491,7 +572,7 @@ extern void pgstat_end_function_usage(PgStat_FunctionCallUsage *fcu,
 									  bool finalize);
 
 extern PgStat_StatFuncEntry *pgstat_fetch_stat_funcentry(Oid func_id);
-extern PgStat_BackendFunctionEntry *find_funcstat_entry(Oid func_id);
+extern PgStat_FunctionCounts *find_funcstat_entry(Oid func_id);
 
 
 /*
@@ -526,41 +607,41 @@ extern void pgstat_report_analyze(Relation rel,
 #define pgstat_count_heap_scan(rel)									\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_numscans++;				\
+			(rel)->pgstat_info->counts.numscans++;					\
 	} while (0)
 #define pgstat_count_heap_getnext(rel)								\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_tuples_returned++;		\
+			(rel)->pgstat_info->counts.tuples_returned++;			\
 	} while (0)
 #define pgstat_count_heap_fetch(rel)								\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_tuples_fetched++;		\
+			(rel)->pgstat_info->counts.tuples_fetched++;			\
 	} while (0)
 #define pgstat_count_index_scan(rel)								\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_numscans++;				\
+			(rel)->pgstat_info->counts.numscans++;					\
 	} while (0)
 #define pgstat_count_index_tuples(rel, n)							\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_tuples_returned += (n);	\
+			(rel)->pgstat_info->counts.tuples_returned += (n);		\
 	} while (0)
 #define pgstat_count_buffer_read(rel)								\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_blocks_fetched++;		\
+			(rel)->pgstat_info->counts.blocks_fetched++;			\
 	} while (0)
 #define pgstat_count_buffer_hit(rel)								\
 	do {															\
 		if (pgstat_should_count_relation(rel))						\
-			(rel)->pgstat_info->t_counts.t_blocks_hit++;			\
+			(rel)->pgstat_info->counts.blocks_hit++;				\
 	} while (0)
 
 extern void pgstat_count_heap_insert(Relation rel, PgStat_Counter n);
-extern void pgstat_count_heap_update(Relation rel, bool hot);
+extern void pgstat_count_heap_update(Relation rel, bool hot, bool newpage);
 extern void pgstat_count_heap_delete(Relation rel);
 extern void pgstat_count_truncate(Relation rel);
 extern void pgstat_update_heap_dead_tuples(Relation rel, int delta);
@@ -690,7 +771,7 @@ extern PGDLLIMPORT SessionEndType pgStatSessionEndCause;
  */
 
 /* updated directly by backends and background processes */
-extern PGDLLIMPORT PgStat_WalStats PendingWalStats;
+extern PGDLLIMPORT PgStat_PendingWalStats PendingWalStats;
 
 
 #endif							/* PGSTAT_H */

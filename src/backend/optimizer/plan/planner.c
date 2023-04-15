@@ -70,7 +70,7 @@
 
 /* GUC parameters */
 double		cursor_tuple_fraction = DEFAULT_CURSOR_TUPLE_FRACTION;
-int			force_parallel_mode = FORCE_PARALLEL_OFF;
+int			debug_parallel_query = DEBUG_PARALLEL_OFF;
 bool		parallel_leader_participation = true;
 
 /* Hook for plugins to get control in planner() */
@@ -364,12 +364,12 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * true during plan creation if a Gather or Gather Merge plan is actually
 	 * created (cf. create_gather_plan, create_gather_merge_plan).
 	 *
-	 * However, if force_parallel_mode = on or force_parallel_mode = regress,
-	 * then we impose parallel mode whenever it's safe to do so, even if the
-	 * final plan doesn't use parallelism.  It's not safe to do so if the
-	 * query contains anything parallel-unsafe; parallelModeOK will be false
-	 * in that case.  Note that parallelModeOK can't change after this point.
-	 * Otherwise, everything in the query is either parallel-safe or
+	 * However, if debug_parallel_query = on or debug_parallel_query =
+	 * regress, then we impose parallel mode whenever it's safe to do so, even
+	 * if the final plan doesn't use parallelism.  It's not safe to do so if
+	 * the query contains anything parallel-unsafe; parallelModeOK will be
+	 * false in that case.  Note that parallelModeOK can't change after this
+	 * point. Otherwise, everything in the query is either parallel-safe or
 	 * parallel-restricted, and in either case it should be OK to impose
 	 * parallel-mode restrictions.  If that ends up breaking something, then
 	 * either some function the user included in the query is incorrectly
@@ -377,7 +377,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * parallel-unsafe, or else the query planner itself has a bug.
 	 */
 	glob->parallelModeNeeded = glob->parallelModeOK &&
-		(force_parallel_mode != FORCE_PARALLEL_OFF);
+		(debug_parallel_query != DEBUG_PARALLEL_OFF);
 
 	/* Determine what fraction of the plan is likely to be scanned */
 	if (cursorOptions & CURSOR_OPT_FAST_PLAN)
@@ -431,17 +431,15 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 	 * Optionally add a Gather node for testing purposes, provided this is
 	 * actually a safe thing to do.
 	 */
-	if (force_parallel_mode != FORCE_PARALLEL_OFF && top_plan->parallel_safe)
+	if (debug_parallel_query != DEBUG_PARALLEL_OFF && top_plan->parallel_safe)
 	{
 		Gather	   *gather = makeNode(Gather);
 
 		/*
-		 * If there are any initPlans attached to the formerly-top plan node,
-		 * move them up to the Gather node; same as we do for Material node in
-		 * materialize_finished_plan.
+		 * Top plan must not have any initPlans, else it shouldn't have been
+		 * marked parallel-safe.
 		 */
-		gather->plan.initPlan = top_plan->initPlan;
-		top_plan->initPlan = NIL;
+		Assert(top_plan->initPlan == NIL);
 
 		gather->plan.targetlist = top_plan->targetlist;
 		gather->plan.qual = NIL;
@@ -449,7 +447,7 @@ standard_planner(Query *parse, const char *query_string, int cursorOptions,
 		gather->plan.righttree = NULL;
 		gather->num_workers = 1;
 		gather->single_copy = true;
-		gather->invisible = (force_parallel_mode == FORCE_PARALLEL_REGRESS);
+		gather->invisible = (debug_parallel_query == DEBUG_PARALLEL_REGRESS);
 
 		/*
 		 * Since this Gather has no parallel-aware descendants to signal to,
@@ -625,8 +623,10 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	root->init_plans = NIL;
 	root->cte_plan_ids = NIL;
 	root->multiexpr_params = NIL;
+	root->join_domains = NIL;
 	root->eq_classes = NIL;
 	root->ec_merging_done = false;
+	root->last_rinfo_serial = 0;
 	root->all_result_relids =
 		parse->resultRelation ? bms_make_singleton(parse->resultRelation) : NULL;
 	root->leaf_result_relids = NULL;	/* we'll find out leaf-ness later */
@@ -652,6 +652,13 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		root->wt_param_id = -1;
 	root->non_recursive_path = NULL;
 	root->partColsUpdated = false;
+
+	/*
+	 * Create the top-level join domain.  This won't have valid contents until
+	 * deconstruct_jointree fills it in, but the node needs to exist before
+	 * that so we can build EquivalenceClasses referencing it.
+	 */
+	root->join_domains = list_make1(makeNode(JoinDomain));
 
 	/*
 	 * If there is a WITH list, process each WITH query and either convert it
@@ -912,7 +919,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 			 */
 			if (rte->lateral && root->hasJoinRTEs)
 				rte->subquery = (Query *)
-					flatten_join_alias_vars(root->parse,
+					flatten_join_alias_vars(root, root->parse,
 											(Node *) rte->subquery);
 		}
 		else if (rte->rtekind == RTE_FUNCTION)
@@ -1043,10 +1050,11 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 
 	/*
 	 * If we have any RTE_RESULT relations, see if they can be deleted from
-	 * the jointree.  This step is most effectively done after we've done
-	 * expression preprocessing and outer join reduction.
+	 * the jointree.  We also rely on this processing to flatten single-child
+	 * FromExprs underneath outer joins.  This step is most effectively done
+	 * after we've done expression preprocessing and outer join reduction.
 	 */
-	if (hasResultRTEs)
+	if (hasResultRTEs || hasOuterJoins)
 		remove_useless_result_rtes(root);
 
 	/*
@@ -1110,7 +1118,7 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 		  kind == EXPRKIND_VALUES ||
 		  kind == EXPRKIND_TABLESAMPLE ||
 		  kind == EXPRKIND_TABLEFUNC))
-		expr = flatten_join_alias_vars(root->parse, expr);
+		expr = flatten_join_alias_vars(root, root->parse, expr);
 
 	/*
 	 * Simplify constant expressions.  For function RTEs, this was already
@@ -2246,7 +2254,7 @@ preprocess_rowmarks(PlannerInfo *root)
 	 * make a bitmapset of all base rels and then remove the items we don't
 	 * need or have FOR [KEY] UPDATE/SHARE marks for.
 	 */
-	rels = get_relids_in_jointree((Node *) parse->jointree, false);
+	rels = get_relids_in_jointree((Node *) parse->jointree, false, false);
 	if (parse->resultRelation)
 		rels = bms_del_member(rels, parse->resultRelation);
 
@@ -6532,6 +6540,7 @@ plan_cluster_use_sort(Oid tableOid, Oid indexOid)
 	root->query_level = 1;
 	root->planner_cxt = CurrentMemoryContext;
 	root->wt_param_id = -1;
+	root->join_domains = list_make1(makeNode(JoinDomain));
 
 	/* Build a minimal RTE for the rel */
 	rte = makeNode(RangeTblEntry);
@@ -6653,6 +6662,7 @@ plan_create_index_workers(Oid tableOid, Oid indexOid)
 	root->query_level = 1;
 	root->planner_cxt = CurrentMemoryContext;
 	root->wt_param_id = -1;
+	root->join_domains = list_make1(makeNode(JoinDomain));
 
 	/*
 	 * Build a minimal RTE.

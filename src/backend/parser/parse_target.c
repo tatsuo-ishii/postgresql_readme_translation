@@ -1371,7 +1371,7 @@ ExpandSingleTable(ParseState *pstate, ParseNamespaceItem *nsitem,
 		List	   *vars;
 		ListCell   *l;
 
-		vars = expandNSItemVars(nsitem, sublevels_up, location, NULL);
+		vars = expandNSItemVars(pstate, nsitem, sublevels_up, location, NULL);
 
 		/*
 		 * Require read access to the table.  This is normally redundant with
@@ -1907,7 +1907,25 @@ FigureColnameInternal(Node *node, char **name)
 			}
 			break;
 		case T_XmlSerialize:
+			/* make XMLSERIALIZE act like a regular function */
 			*name = "xmlserialize";
+			return 2;
+		case T_JsonObjectConstructor:
+			/* make JSON_OBJECT act like a regular function */
+			*name = "json_object";
+			return 2;
+		case T_JsonArrayConstructor:
+		case T_JsonArrayQueryConstructor:
+			/* make JSON_ARRAY act like a regular function */
+			*name = "json_array";
+			return 2;
+		case T_JsonObjectAgg:
+			/* make JSON_OBJECTAGG act like a regular function */
+			*name = "json_objectagg";
+			return 2;
+		case T_JsonArrayAgg:
+			/* make JSON_ARRAYAGG act like a regular function */
+			*name = "json_arrayagg";
 			return 2;
 		default:
 			break;

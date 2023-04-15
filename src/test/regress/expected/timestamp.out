@@ -144,16 +144,16 @@ SELECT pg_input_is_valid('2001-01-01 00:00 Nehwon/Lankhmar', 'timestamp');
  f
 (1 row)
 
-SELECT pg_input_error_message('garbage', 'timestamp');
-               pg_input_error_message               
-----------------------------------------------------
- invalid input syntax for type timestamp: "garbage"
+SELECT * FROM pg_input_error_info('garbage', 'timestamp');
+                      message                       | detail | hint | sql_error_code 
+----------------------------------------------------+--------+------+----------------
+ invalid input syntax for type timestamp: "garbage" |        |      | 22007
 (1 row)
 
-SELECT pg_input_error_message('2001-01-01 00:00 Nehwon/Lankhmar', 'timestamp');
-           pg_input_error_message           
---------------------------------------------
- time zone "nehwon/lankhmar" not recognized
+SELECT * FROM pg_input_error_info('2001-01-01 00:00 Nehwon/Lankhmar', 'timestamp');
+                  message                   | detail | hint | sql_error_code 
+--------------------------------------------+--------+------+----------------
+ time zone "nehwon/lankhmar" not recognized |        |      | 22023
 (1 row)
 
 -- Check date conversion and date arithmetic
@@ -1207,6 +1207,15 @@ SELECT extract(epoch from '5000-01-01 00:00:00'::timestamp);
  95617584000.000000
 (1 row)
 
+-- test edge-case overflow in timestamp subtraction
+SELECT timestamp '294276-12-31 23:59:59' - timestamp '1999-12-23 19:59:04.224193' AS ok;
+                   ok                    
+-----------------------------------------
+ @ 106751991 days 4 hours 54.775807 secs
+(1 row)
+
+SELECT timestamp '294276-12-31 23:59:59' - timestamp '1999-12-23 19:59:04.224192' AS overflows;
+ERROR:  interval out of range
 -- TO_CHAR()
 SELECT to_char(d1, 'DAY Day day DY Dy dy MONTH Month month RM MON Mon mon')
    FROM TIMESTAMP_TBL;

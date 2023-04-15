@@ -1022,7 +1022,7 @@ select \if false \\ (bogus \else \\ 42 \endif \\ forty_two;
 	\timing arg1
 	\unset arg1
 	\w arg1
-	\watch arg1
+	\watch arg1 arg2
 	\x arg1
 	-- \else here is eaten as part of OT_FILEPIPE argument
 	\w |/no/such/file \else
@@ -1274,6 +1274,30 @@ reset work_mem;
 \df *._pg_expandarray
 \do - pg_catalog.int4
 \do && anyarray *
+
+-- check \df+
+-- we have to use functions with a predictable owner name, so make a role
+create role regress_psql_user superuser;
+begin;
+set session authorization regress_psql_user;
+
+create function psql_df_internal (float8)
+  returns float8
+  language internal immutable parallel safe strict
+  as 'dsin';
+create function psql_df_sql (x integer)
+  returns integer
+  security definer
+  begin atomic select x + 1; end;
+create function psql_df_plpgsql ()
+  returns void
+  language plpgsql
+  as $$ begin return; end; $$;
+comment on function psql_df_plpgsql () is 'some comment';
+
+\df+ psql_df_*
+rollback;
+drop role regress_psql_user;
 
 -- check \sf
 \sf information_schema._pg_expandarray

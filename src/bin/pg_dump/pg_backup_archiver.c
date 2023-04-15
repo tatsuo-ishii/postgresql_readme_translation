@@ -31,6 +31,7 @@
 #endif
 
 #include "common/string.h"
+#include "compress_io.h"
 #include "dumputils.h"
 #include "fe_utils/string_utils.h"
 #include "lib/stringinfo.h"
@@ -42,13 +43,6 @@
 
 #define TEXT_DUMP_HEADER "--\n-- PostgreSQL database dump\n--\n\n"
 #define TEXT_DUMPALL_HEADER "--\n-- PostgreSQL database cluster dump\n--\n\n"
-
-/* state needed to save/restore an archive's output target */
-typedef struct _outputContext
-{
-	void	   *OF;
-	int			gzOut;
-} OutputContext;
 
 /*
  * State for tracking TocEntrys that are ready to process during a parallel
@@ -92,6 +86,7 @@ static RestorePass _tocEntryRestorePass(TocEntry *te);
 static bool _tocEntryIsACL(TocEntry *te);
 static void _disableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te);
 static void _enableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te);
+static bool is_load_via_partition_root(TocEntry *te);
 static void buildTocEntryArrays(ArchiveHandle *AH);
 static void _moveBefore(TocEntry *pos, TocEntry *te);
 static int	_discoverArchiveFormat(ArchiveHandle *AH);
@@ -101,8 +96,8 @@ static void dump_lo_buf(ArchiveHandle *AH);
 static void dumpTimestamp(ArchiveHandle *AH, const char *msg, time_t tim);
 static void SetOutput(ArchiveHandle *AH, const char *filename,
 					  const pg_compress_specification compression_spec);
-static OutputContext SaveOutput(ArchiveHandle *AH);
-static void RestoreOutput(ArchiveHandle *AH, OutputContext savedContext);
+static CompressFileHandle *SaveOutput(ArchiveHandle *AH);
+static void RestoreOutput(ArchiveHandle *AH, CompressFileHandle *savedOutput);
 
 static int	restore_toc_entry(ArchiveHandle *AH, TocEntry *te, bool is_parallel);
 static void restore_toc_entries_prefork(ArchiveHandle *AH,
@@ -271,19 +266,13 @@ OpenArchive(const char *FileSpec, const ArchiveFormat fmt)
 void
 CloseArchive(Archive *AHX)
 {
-	int			res = 0;
 	ArchiveHandle *AH = (ArchiveHandle *) AHX;
 
 	AH->ClosePtr(AH);
 
 	/* Close the output */
-	errno = 0;					/* in case gzclose() doesn't set it */
-	if (AH->gzOut)
-		res = GZCLOSE(AH->OF);
-	else if (AH->OF != stdout)
-		res = fclose(AH->OF);
-
-	if (res != 0)
+	errno = 0;
+	if (!EndCompressFileHandle(AH->OF))
 		pg_fatal("could not close output file: %m");
 }
 
@@ -363,7 +352,7 @@ RestoreArchive(Archive *AHX)
 	RestoreOptions *ropt = AH->public.ropt;
 	bool		parallel_mode;
 	TocEntry   *te;
-	OutputContext sav;
+	CompressFileHandle *sav;
 
 	AH->stage = STAGE_INITIALIZING;
 
@@ -391,17 +380,21 @@ RestoreArchive(Archive *AHX)
 	/*
 	 * Make sure we won't need (de)compression we haven't got
 	 */
-#ifndef HAVE_LIBZ
-	if (AH->compression_spec.algorithm == PG_COMPRESSION_GZIP &&
-		AH->PrintTocDataPtr != NULL)
+	if (AH->PrintTocDataPtr != NULL)
 	{
 		for (te = AH->toc->next; te != AH->toc; te = te->next)
 		{
 			if (te->hadDumper && (te->reqs & REQ_DATA) != 0)
-				pg_fatal("cannot restore from compressed archive (compression not supported in this installation)");
+			{
+				char *errmsg = supports_compression(AH->compression_spec);
+				if (errmsg)
+					pg_fatal("cannot restore from compressed archive (%s)",
+							  errmsg);
+				else
+					break;
+			}
 		}
 	}
-#endif
 
 	/*
 	 * Prepare index arrays, so we can assume we have them throughout restore.
@@ -892,6 +885,8 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te, bool is_parallel)
 				}
 				else
 				{
+					bool		use_truncate;
+
 					_disableTriggersIfNecessary(AH, te);
 
 					/* Select owner and schema as necessary */
@@ -903,13 +898,24 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te, bool is_parallel)
 
 					/*
 					 * In parallel restore, if we created the table earlier in
-					 * the run then we wrap the COPY in a transaction and
-					 * precede it with a TRUNCATE.  If archiving is not on
-					 * this prevents WAL-logging the COPY.  This obtains a
-					 * speedup similar to that from using single_txn mode in
-					 * non-parallel restores.
+					 * this run (so that we know it is empty) and we are not
+					 * restoring a load-via-partition-root data item then we
+					 * wrap the COPY in a transaction and precede it with a
+					 * TRUNCATE.  If wal_level is set to minimal this prevents
+					 * WAL-logging the COPY.  This obtains a speedup similar
+					 * to that from using single_txn mode in non-parallel
+					 * restores.
+					 *
+					 * We mustn't do this for load-via-partition-root cases
+					 * because some data might get moved across partition
+					 * boundaries, risking deadlock and/or loss of previously
+					 * loaded data.  (We assume that all partitions of a
+					 * partitioned table will be treated the same way.)
 					 */
-					if (is_parallel && te->created)
+					use_truncate = is_parallel && te->created &&
+						!is_load_via_partition_root(te);
+
+					if (use_truncate)
 					{
 						/*
 						 * Parallel restore is always talking directly to a
@@ -947,7 +953,7 @@ restore_toc_entry(ArchiveHandle *AH, TocEntry *te, bool is_parallel)
 					AH->outputKind = OUTPUT_SQLCMDS;
 
 					/* close out the transaction started above */
-					if (is_parallel && te->created)
+					if (use_truncate)
 						CommitTransaction(&AH->public);
 
 					_enableTriggersIfNecessary(AH, te);
@@ -1042,6 +1048,43 @@ _enableTriggersIfNecessary(ArchiveHandle *AH, TocEntry *te)
 }
 
 /*
+ * Detect whether a TABLE DATA TOC item is performing "load via partition
+ * root", that is the target table is an ancestor partition rather than the
+ * table the TOC item is nominally for.
+ *
+ * In newer archive files this can be detected by checking for a special
+ * comment placed in te->defn.  In older files we have to fall back to seeing
+ * if the COPY statement targets the named table or some other one.  This
+ * will not work for data dumped as INSERT commands, so we could give a false
+ * negative in that case; fortunately, that's a rarely-used option.
+ */
+static bool
+is_load_via_partition_root(TocEntry *te)
+{
+	if (te->defn &&
+		strncmp(te->defn, "-- load via partition root ", 27) == 0)
+		return true;
+	if (te->copyStmt && *te->copyStmt)
+	{
+		PQExpBuffer copyStmt = createPQExpBuffer();
+		bool		result;
+
+		/*
+		 * Build the initial part of the COPY as it would appear if the
+		 * nominal target table is the actual target.  If we see anything
+		 * else, it must be a load-via-partition-root case.
+		 */
+		appendPQExpBuffer(copyStmt, "COPY %s ",
+						  fmtQualifiedId(te->namespace, te->tag));
+		result = strncmp(te->copyStmt, copyStmt->data, copyStmt->len) != 0;
+		destroyPQExpBuffer(copyStmt);
+		return result;
+	}
+	/* Assume it's not load-via-partition-root */
+	return false;
+}
+
+/*
  * This is a routine that is part of the dumper interface, hence the 'Archive*' parameter.
  */
 
@@ -1133,7 +1176,7 @@ PrintTOCSummary(Archive *AHX)
 	TocEntry   *te;
 	pg_compress_specification out_compression_spec = {0};
 	teSection	curSection;
-	OutputContext sav;
+	CompressFileHandle *sav;
 	const char *fmtName;
 	char		stamp_str[64];
 
@@ -1149,9 +1192,10 @@ PrintTOCSummary(Archive *AHX)
 		strcpy(stamp_str, "[unknown]");
 
 	ahprintf(AH, ";\n; Archive created at %s\n", stamp_str);
-	ahprintf(AH, ";     dbname: %s\n;     TOC Entries: %d\n;     Compression: %d\n",
+	ahprintf(AH, ";     dbname: %s\n;     TOC Entries: %d\n;     Compression: %s\n",
 			 sanitize_line(AH->archdbname, false),
-			 AH->tocCount, AH->compression_spec.level);
+			 AH->tocCount,
+			 get_compress_algorithm_name(AH->compression_spec.algorithm));
 
 	switch (AH->format)
 	{
@@ -1508,95 +1552,56 @@ static void
 SetOutput(ArchiveHandle *AH, const char *filename,
 		  const pg_compress_specification compression_spec)
 {
-	int			fn;
+	CompressFileHandle *CFH;
+	const char *mode;
+	int			fn = -1;
 
 	if (filename)
 	{
 		if (strcmp(filename, "-") == 0)
 			fn = fileno(stdout);
-		else
-			fn = -1;
 	}
 	else if (AH->FH)
 		fn = fileno(AH->FH);
 	else if (AH->fSpec)
 	{
-		fn = -1;
 		filename = AH->fSpec;
 	}
 	else
 		fn = fileno(stdout);
 
-	/* If compression explicitly requested, use gzopen */
-#ifdef HAVE_LIBZ
-	if (compression_spec.algorithm == PG_COMPRESSION_GZIP)
-	{
-		char		fmode[14];
-
-		/* Don't use PG_BINARY_x since this is zlib */
-		sprintf(fmode, "wb%d", compression_spec.level);
-		if (fn >= 0)
-			AH->OF = gzdopen(dup(fn), fmode);
-		else
-			AH->OF = gzopen(filename, fmode);
-		AH->gzOut = 1;
-	}
+	if (AH->mode == archModeAppend)
+		mode = PG_BINARY_A;
 	else
-#endif
-	{							/* Use fopen */
-		if (AH->mode == archModeAppend)
-		{
-			if (fn >= 0)
-				AH->OF = fdopen(dup(fn), PG_BINARY_A);
-			else
-				AH->OF = fopen(filename, PG_BINARY_A);
-		}
-		else
-		{
-			if (fn >= 0)
-				AH->OF = fdopen(dup(fn), PG_BINARY_W);
-			else
-				AH->OF = fopen(filename, PG_BINARY_W);
-		}
-		AH->gzOut = 0;
-	}
+		mode = PG_BINARY_W;
 
-	if (!AH->OF)
+	CFH = InitCompressFileHandle(compression_spec);
+
+	if (!CFH->open_func(filename, fn, mode, CFH))
 	{
 		if (filename)
 			pg_fatal("could not open output file \"%s\": %m", filename);
 		else
 			pg_fatal("could not open output file: %m");
 	}
+
+	AH->OF = CFH;
 }
 
-static OutputContext
+static CompressFileHandle *
 SaveOutput(ArchiveHandle *AH)
 {
-	OutputContext sav;
-
-	sav.OF = AH->OF;
-	sav.gzOut = AH->gzOut;
-
-	return sav;
+	return (CompressFileHandle *) AH->OF;
 }
 
 static void
-RestoreOutput(ArchiveHandle *AH, OutputContext savedContext)
+RestoreOutput(ArchiveHandle *AH, CompressFileHandle *savedOutput)
 {
-	int			res;
-
-	errno = 0;					/* in case gzclose() doesn't set it */
-	if (AH->gzOut)
-		res = GZCLOSE(AH->OF);
-	else
-		res = fclose(AH->OF);
-
-	if (res != 0)
+	errno = 0;
+	if (!EndCompressFileHandle(AH->OF))
 		pg_fatal("could not close output file: %m");
 
-	AH->gzOut = savedContext.gzOut;
-	AH->OF = savedContext.OF;
+	AH->OF = savedOutput;
 }
 
 
@@ -1720,21 +1725,21 @@ ahwrite(const void *ptr, size_t size, size_t nmemb, ArchiveHandle *AH)
 
 		bytes_written = size * nmemb;
 	}
-	else if (AH->gzOut)
-		bytes_written = GZWRITE(ptr, size, nmemb, AH->OF);
 	else if (AH->CustomOutPtr)
 		bytes_written = AH->CustomOutPtr(AH, ptr, size * nmemb);
 
+	/*
+	 * If we're doing a restore, and it's direct to DB, and we're connected
+	 * then send it to the DB.
+	 */
+	else if (RestoringToDB(AH))
+		bytes_written = ExecuteSqlCommandBuf(&AH->public, (const char *) ptr, size * nmemb);
 	else
 	{
-		/*
-		 * If we're doing a restore, and it's direct to DB, and we're
-		 * connected then send it to the DB.
-		 */
-		if (RestoringToDB(AH))
-			bytes_written = ExecuteSqlCommandBuf(&AH->public, (const char *) ptr, size * nmemb);
-		else
-			bytes_written = fwrite(ptr, size, nmemb, AH->OF) * size;
+		CompressFileHandle *CFH = (CompressFileHandle *) AH->OF;
+
+		if (CFH->write_func(ptr, size * nmemb, CFH))
+			bytes_written = size * nmemb;
 	}
 
 	if (bytes_written != size * nmemb)
@@ -2077,6 +2082,18 @@ ReadStr(ArchiveHandle *AH)
 	return buf;
 }
 
+static bool
+_fileExistsInDirectory(const char *dir, const char *filename)
+{
+	struct stat st;
+	char		buf[MAXPGPATH];
+
+	if (snprintf(buf, MAXPGPATH, "%s/%s", dir, filename) >= MAXPGPATH)
+		pg_fatal("directory name too long: \"%s\"", dir);
+
+	return (stat(buf, &st) == 0 && S_ISREG(st.st_mode));
+}
+
 static int
 _discoverArchiveFormat(ArchiveHandle *AH)
 {
@@ -2103,30 +2120,24 @@ _discoverArchiveFormat(ArchiveHandle *AH)
 
 		/*
 		 * Check if the specified archive is a directory. If so, check if
-		 * there's a "toc.dat" (or "toc.dat.gz") file in it.
+		 * there's a "toc.dat" (or "toc.dat.{gz,lz4,zst}") file in it.
 		 */
 		if (stat(AH->fSpec, &st) == 0 && S_ISDIR(st.st_mode))
 		{
-			char		buf[MAXPGPATH];
-
-			if (snprintf(buf, MAXPGPATH, "%s/toc.dat", AH->fSpec) >= MAXPGPATH)
-				pg_fatal("directory name too long: \"%s\"",
-						 AH->fSpec);
-			if (stat(buf, &st) == 0 && S_ISREG(st.st_mode))
-			{
-				AH->format = archDirectory;
+			AH->format = archDirectory;
+			if (_fileExistsInDirectory(AH->fSpec, "toc.dat"))
 				return AH->format;
-			}
-
 #ifdef HAVE_LIBZ
-			if (snprintf(buf, MAXPGPATH, "%s/toc.dat.gz", AH->fSpec) >= MAXPGPATH)
-				pg_fatal("directory name too long: \"%s\"",
-						 AH->fSpec);
-			if (stat(buf, &st) == 0 && S_ISREG(st.st_mode))
-			{
-				AH->format = archDirectory;
+			if (_fileExistsInDirectory(AH->fSpec, "toc.dat.gz"))
 				return AH->format;
-			}
+#endif
+#ifdef USE_LZ4
+			if (_fileExistsInDirectory(AH->fSpec, "toc.dat.lz4"))
+				return AH->format;
+#endif
+#ifdef USE_ZSTD
+			if (_fileExistsInDirectory(AH->fSpec, "toc.dat.zst"))
+				return AH->format;
 #endif
 			pg_fatal("directory \"%s\" does not appear to be a valid archive (\"toc.dat\" does not exist)",
 					 AH->fSpec);
@@ -2224,6 +2235,8 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 		 SetupWorkerPtrType setupWorkerPtr)
 {
 	ArchiveHandle *AH;
+	CompressFileHandle *CFH;
+	pg_compress_specification out_compress_spec = {0};
 
 	pg_log_debug("allocating AH for %s, format %d",
 				 FileSpec ? FileSpec : "(stdio)", fmt);
@@ -2277,8 +2290,11 @@ _allocAH(const char *FileSpec, const ArchiveFormat fmt,
 	memset(&(AH->sqlparse), 0, sizeof(AH->sqlparse));
 
 	/* Open stdout with no compression for AH output handle */
-	AH->gzOut = 0;
-	AH->OF = stdout;
+	out_compress_spec.algorithm = PG_COMPRESSION_NONE;
+	CFH = InitCompressFileHandle(out_compress_spec);
+	if (!CFH->open_func(NULL, fileno(stdout), PG_BINARY_A, CFH))
+		pg_fatal("could not open stdout for appending: %m");
+	AH->OF = CFH;
 
 	/*
 	 * On Windows, we need to use binary mode to read/write non-text files,
@@ -2363,8 +2379,7 @@ WriteDataChunks(ArchiveHandle *AH, ParallelState *pstate)
 		}
 
 		if (ntes > 1)
-			qsort((void *) tes, ntes, sizeof(TocEntry *),
-				  TocEntrySizeCompare);
+			qsort(tes, ntes, sizeof(TocEntry *), TocEntrySizeCompare);
 
 		for (int i = 0; i < ntes; i++)
 			DispatchJobForTocEntry(AH, pstate, tes[i], ACT_DUMP,
@@ -2989,8 +3004,12 @@ _tocEntryRequired(TocEntry *te, teSection curSection, ArchiveHandle *AH)
 			res = res & ~REQ_DATA;
 	}
 
-	/* If there's no definition command, there's no schema component */
-	if (!te->defn || !te->defn[0])
+	/*
+	 * If there's no definition command, there's no schema component.  Treat
+	 * "load via partition root" comments as not schema.
+	 */
+	if (!te->defn || !te->defn[0] ||
+		strncmp(te->defn, "-- load via partition root ", 27) == 0)
 		res = res & ~REQ_SCHEMA;
 
 	/*
@@ -3691,12 +3710,7 @@ WriteHead(ArchiveHandle *AH)
 	AH->WriteBytePtr(AH, AH->intSize);
 	AH->WriteBytePtr(AH, AH->offSize);
 	AH->WriteBytePtr(AH, AH->format);
-	/*
-	 * For now the compression type is implied by the level.  This will need
-	 * to change once support for more compression algorithms is added,
-	 * requiring a format bump.
-	 */
-	WriteInt(AH, AH->compression_spec.level);
+	AH->WriteBytePtr(AH, AH->compression_spec.algorithm);
 	crtm = *localtime(&AH->createDate);
 	WriteInt(AH, crtm.tm_sec);
 	WriteInt(AH, crtm.tm_min);
@@ -3713,6 +3727,7 @@ WriteHead(ArchiveHandle *AH)
 void
 ReadHead(ArchiveHandle *AH)
 {
+	char	   *errmsg;
 	char		vmaj,
 				vmin,
 				vrev;
@@ -3767,10 +3782,11 @@ ReadHead(ArchiveHandle *AH)
 		pg_fatal("expected format (%d) differs from format found in file (%d)",
 				 AH->format, fmt);
 
-	/* Guess the compression method based on the level */
-	AH->compression_spec.algorithm = PG_COMPRESSION_NONE;
-	if (AH->version >= K_VERS_1_2)
+	if (AH->version >= K_VERS_1_15)
+		AH->compression_spec.algorithm = AH->ReadBytePtr(AH);
+	else if (AH->version >= K_VERS_1_2)
 	{
+		/* Guess the compression method based on the level */
 		if (AH->version < K_VERS_1_4)
 			AH->compression_spec.level = AH->ReadBytePtr(AH);
 		else
@@ -3782,10 +3798,13 @@ ReadHead(ArchiveHandle *AH)
 	else
 		AH->compression_spec.algorithm = PG_COMPRESSION_GZIP;
 
-#ifndef HAVE_LIBZ
-	if (AH->compression_spec.algorithm == PG_COMPRESSION_GZIP)
-		pg_fatal("archive is compressed, but this installation does not support compression");
-#endif
+	errmsg = supports_compression(AH->compression_spec);
+	if (errmsg)
+	{
+		pg_log_warning("archive is compressed, but this installation does not support compression (%s) -- no data will be available",
+						errmsg);
+		pg_free(errmsg);
+	}
 
 	if (AH->version >= K_VERS_1_4)
 	{

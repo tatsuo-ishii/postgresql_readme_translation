@@ -95,6 +95,12 @@ struct BufFile
 	off_t		curOffset;		/* offset part of current pos */
 	int			pos;			/* next read/write position in buffer */
 	int			nbytes;			/* total # of valid bytes in buffer */
+
+	/*
+	 * XXX Should ideally us PGIOAlignedBlock, but might need a way to avoid
+	 * wasting per-file alignment padding when some users create many
+	 * files.
+	 */
 	PGAlignedBlock buffer;
 };
 
@@ -119,7 +125,7 @@ makeBufFileCommon(int nfiles)
 	file->dirty = false;
 	file->resowner = CurrentResourceOwner;
 	file->curFile = 0;
-	file->curOffset = 0L;
+	file->curOffset = 0;
 	file->pos = 0;
 	file->nbytes = 0;
 
@@ -439,13 +445,15 @@ BufFileLoadBuffer(BufFile *file)
 		file->curFile + 1 < file->numFiles)
 	{
 		file->curFile++;
-		file->curOffset = 0L;
+		file->curOffset = 0;
 	}
 
 	thisfile = file->files[file->curFile];
 
 	if (track_io_timing)
 		INSTR_TIME_SET_CURRENT(io_start);
+	else
+		INSTR_TIME_SET_ZERO(io_start);
 
 	/*
 	 * Read whatever we can get, up to a full bufferload.
@@ -467,8 +475,7 @@ BufFileLoadBuffer(BufFile *file)
 	if (track_io_timing)
 	{
 		INSTR_TIME_SET_CURRENT(io_time);
-		INSTR_TIME_SUBTRACT(io_time, io_start);
-		INSTR_TIME_ADD(pgBufferUsage.temp_blk_read_time, io_time);
+		INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_read_time, io_time, io_start);
 	}
 
 	/* we choose not to advance curOffset here */
@@ -509,7 +516,7 @@ BufFileDumpBuffer(BufFile *file)
 			while (file->curFile + 1 >= file->numFiles)
 				extendBufFile(file);
 			file->curFile++;
-			file->curOffset = 0L;
+			file->curOffset = 0;
 		}
 
 		/*
@@ -525,6 +532,8 @@ BufFileDumpBuffer(BufFile *file)
 
 		if (track_io_timing)
 			INSTR_TIME_SET_CURRENT(io_start);
+		else
+			INSTR_TIME_SET_ZERO(io_start);
 
 		bytestowrite = FileWrite(thisfile,
 								 file->buffer.data + wpos,
@@ -540,8 +549,7 @@ BufFileDumpBuffer(BufFile *file)
 		if (track_io_timing)
 		{
 			INSTR_TIME_SET_CURRENT(io_time);
-			INSTR_TIME_SUBTRACT(io_time, io_start);
-			INSTR_TIME_ADD(pgBufferUsage.temp_blk_write_time, io_time);
+			INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_write_time, io_time, io_start);
 		}
 
 		file->curOffset += bytestowrite;

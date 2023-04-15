@@ -109,6 +109,7 @@ brinhandler(PG_FUNCTION_ARGS)
 	amroutine->amcanparallel = false;
 	amroutine->amcaninclude = false;
 	amroutine->amusemaintenanceworkmem = false;
+	amroutine->amsummarizing = true;
 	amroutine->amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_CLEANUP;
 	amroutine->amkeytype = InvalidOid;
@@ -686,6 +687,13 @@ bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 								break;
 						}
 					}
+
+					/*
+					 * If we found a scan key eliminating the range, no need to
+					 * check additional ones.
+					 */
+					if (!addrange)
+						break;
 				}
 			}
 		}
@@ -829,9 +837,9 @@ brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)
 	 * whole relation will be rolled back.
 	 */
 
-	meta = ReadBuffer(index, P_NEW);
+	meta = ExtendBufferedRel(EB_REL(index), MAIN_FORKNUM, NULL,
+							 EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK);
 	Assert(BufferGetBlockNumber(meta) == BRIN_METAPAGE_BLKNO);
-	LockBuffer(meta, BUFFER_LOCK_EXCLUSIVE);
 
 	brin_metapage_init(BufferGetPage(meta), BrinGetPagesPerRange(index),
 					   BRIN_CURRENT_VERSION);
@@ -896,9 +904,8 @@ brinbuildempty(Relation index)
 	Buffer		metabuf;
 
 	/* An empty BRIN index has a metapage only. */
-	metabuf =
-		ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-	LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+	metabuf = ExtendBufferedRel(EB_REL(index), INIT_FORKNUM, NULL,
+								EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK);
 
 	/* Initialize and xlog metabuffer. */
 	START_CRIT_SECTION();

@@ -500,6 +500,11 @@ static void zero_var(NumericVar *var);
 static bool set_var_from_str(const char *str, const char *cp,
 							 NumericVar *dest, const char **endptr,
 							 Node *escontext);
+static bool set_var_from_non_decimal_integer_str(const char *str,
+												 const char *cp, int sign,
+												 int base, NumericVar *dest,
+												 const char **endptr,
+												 Node *escontext);
 static void set_var_from_num(Numeric num, NumericVar *dest);
 static void init_var_from_num(Numeric num, NumericVar *dest);
 static void set_var_from_var(const NumericVar *value, NumericVar *dest);
@@ -554,6 +559,10 @@ static void div_var_fast(const NumericVar *var1, const NumericVar *var2,
 						 NumericVar *result, int rscale, bool round);
 static void div_var_int(const NumericVar *var, int ival, int ival_weight,
 						NumericVar *result, int rscale, bool round);
+#ifdef HAVE_INT128
+static void div_var_int64(const NumericVar *var, int64 ival, int ival_weight,
+						  NumericVar *result, int rscale, bool round);
+#endif
 static int	select_div_scale(const NumericVar *var1, const NumericVar *var2);
 static void mod_var(const NumericVar *var1, const NumericVar *var2,
 					NumericVar *result);
@@ -625,6 +634,8 @@ numeric_in(PG_FUNCTION_ARGS)
 	Node	   *escontext = fcinfo->context;
 	Numeric		res;
 	const char *cp;
+	const char *numstart;
+	int			sign;
 
 	/* Skip leading spaces */
 	cp = str;
@@ -636,70 +647,130 @@ numeric_in(PG_FUNCTION_ARGS)
 	}
 
 	/*
+	 * Process the number's sign. This duplicates logic in set_var_from_str(),
+	 * but it's worth doing here, since it simplifies the handling of
+	 * infinities and non-decimal integers.
+	 */
+	numstart = cp;
+	sign = NUMERIC_POS;
+
+	if (*cp == '+')
+		cp++;
+	else if (*cp == '-')
+	{
+		sign = NUMERIC_NEG;
+		cp++;
+	}
+
+	/*
 	 * Check for NaN and infinities.  We recognize the same strings allowed by
 	 * float8in().
+	 *
+	 * Since all other legal inputs have a digit or a decimal point after the
+	 * sign, we need only check for NaN/infinity if that's not the case.
 	 */
-	if (pg_strncasecmp(cp, "NaN", 3) == 0)
-	{
-		res = make_result(&const_nan);
-		cp += 3;
-	}
-	else if (pg_strncasecmp(cp, "Infinity", 8) == 0)
-	{
-		res = make_result(&const_pinf);
-		cp += 8;
-	}
-	else if (pg_strncasecmp(cp, "+Infinity", 9) == 0)
-	{
-		res = make_result(&const_pinf);
-		cp += 9;
-	}
-	else if (pg_strncasecmp(cp, "-Infinity", 9) == 0)
-	{
-		res = make_result(&const_ninf);
-		cp += 9;
-	}
-	else if (pg_strncasecmp(cp, "inf", 3) == 0)
-	{
-		res = make_result(&const_pinf);
-		cp += 3;
-	}
-	else if (pg_strncasecmp(cp, "+inf", 4) == 0)
-	{
-		res = make_result(&const_pinf);
-		cp += 4;
-	}
-	else if (pg_strncasecmp(cp, "-inf", 4) == 0)
-	{
-		res = make_result(&const_ninf);
-		cp += 4;
-	}
-	else
+	if (!isdigit((unsigned char) *cp) && *cp != '.')
 	{
 		/*
-		 * Use set_var_from_str() to parse a normal numeric value
+		 * The number must be NaN or infinity; anything else can only be a
+		 * syntax error. Note that NaN mustn't have a sign.
 		 */
-		NumericVar	value;
-		bool		have_error;
-
-		init_var(&value);
-
-		if (!set_var_from_str(str, cp, &value, &cp, escontext))
-			PG_RETURN_NULL();
+		if (pg_strncasecmp(numstart, "NaN", 3) == 0)
+		{
+			res = make_result(&const_nan);
+			cp = numstart + 3;
+		}
+		else if (pg_strncasecmp(cp, "Infinity", 8) == 0)
+		{
+			res = make_result(sign == NUMERIC_POS ? &const_pinf : &const_ninf);
+			cp += 8;
+		}
+		else if (pg_strncasecmp(cp, "inf", 3) == 0)
+		{
+			res = make_result(sign == NUMERIC_POS ? &const_pinf : &const_ninf);
+			cp += 3;
+		}
+		else
+			goto invalid_syntax;
 
 		/*
-		 * We duplicate a few lines of code here because we would like to
-		 * throw any trailing-junk syntax error before any semantic error
-		 * resulting from apply_typmod.  We can't easily fold the two cases
-		 * together because we mustn't apply apply_typmod to a NaN/Inf.
+		 * Check for trailing junk; there should be nothing left but spaces.
+		 *
+		 * We intentionally do this check before applying the typmod because
+		 * we would like to throw any trailing-junk syntax error before any
+		 * semantic error resulting from apply_typmod_special().
 		 */
 		while (*cp)
 		{
 			if (!isspace((unsigned char) *cp))
-				ereturn(escontext, (Datum) 0,
-						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						 errmsg("invalid input syntax for type %s: \"%s\"",
-								"numeric", str)));
+				goto invalid_syntax;
+			cp++;
+		}
+
+		if (!apply_typmod_special(res, typmod, escontext))
+			PG_RETURN_NULL();
+	}
+	else
+	{
+		/*
+		 * We have a normal numeric value, which may be a non-decimal integer
+		 * or a regular decimal number.
+		 */
+		NumericVar	value;
+		int			base;
+		bool		have_error;
+
+		init_var(&value);
+
+		/*
+		 * Determine the number's base by looking for a non-decimal prefix
+		 * indicator ("0x", "0o", or "0b").
+		 */
+		if (cp[0] == '0')
+		{
+			switch (cp[1])
+			{
+				case 'x':
+				case 'X':
+					base = 16;
+					break;
+				case 'o':
+				case 'O':
+					base = 8;
+					break;
+				case 'b':
+				case 'B':
+					base = 2;
+					break;
+				default:
+					base = 10;
+			}
+		}
+		else
+			base = 10;
+
+		/* Parse the rest of the number and apply the sign */
+		if (base == 10)
+		{
+			if (!set_var_from_str(str, cp, &value, &cp, escontext))
+				PG_RETURN_NULL();
+			value.sign = sign;
+		}
+		else
+		{
+			if (!set_var_from_non_decimal_integer_str(str, cp + 2, sign, base,
+													  &value, &cp, escontext))
+				PG_RETURN_NULL();
+		}
+
+		/*
+		 * Should be nothing left but spaces. As above, throw any typmod error
+		 * after finishing syntax check.
+		 */
+		while (*cp)
+		{
+			if (!isspace((unsigned char) *cp))
+				goto invalid_syntax;
 			cp++;
 		}
 
@@ -714,26 +785,15 @@ numeric_in(PG_FUNCTION_ARGS)
 					 errmsg("value overflows numeric format")));
 
 		free_var(&value);
-
-		PG_RETURN_NUMERIC(res);
 	}
-
-	/* Should be nothing left but spaces */
-	while (*cp)
-	{
-		if (!isspace((unsigned char) *cp))
-			ereturn(escontext, (Datum) 0,
-					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("invalid input syntax for type %s: \"%s\"",
-							"numeric", str)));
-		cp++;
-	}
-
-	/* As above, throw any typmod error after finishing syntax check */
-	if (!apply_typmod_special(res, typmod, escontext))
-		PG_RETURN_NULL();
 
 	PG_RETURN_NUMERIC(res);
+
+invalid_syntax:
+	ereturn(escontext, (Datum) 0,
+			(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+			 errmsg("invalid input syntax for type %s: \"%s\"",
+					"numeric", str)));
 }
 
 
@@ -1847,7 +1907,7 @@ width_bucket_numeric(PG_FUNCTION_ARGS)
 }
 
 /*
- * If 'operand' is not outside the bucket range, determine the correct
+ * 'operand' is inside the bucket range, so determine the correct
  * bucket for it to go. The calculations performed by this function
  * are derived directly from the SQL2003 spec. Note however that we
  * multiply by count before dividing, to avoid unnecessary roundoff error.
@@ -1880,8 +1940,19 @@ compute_bucket(Numeric operand, Numeric bound1, Numeric bound2,
 			operand_var.dscale + count_var->dscale);
 	div_var(&operand_var, &bound2_var, result_var,
 			select_div_scale(&operand_var, &bound2_var), true);
-	add_var(result_var, &const_one, result_var);
-	floor_var(result_var, result_var);
+
+	/*
+	 * Roundoff in the division could give us a quotient exactly equal to
+	 * "count", which is too large.  Clamp so that we do not emit a result
+	 * larger than "count".
+	 */
+	if (cmp_var(result_var, count_var) >= 0)
+		set_var_from_var(count_var, result_var);
+	else
+	{
+		add_var(result_var, &const_one, result_var);
+		floor_var(result_var, result_var);
+	}
 
 	free_var(&bound1_var);
 	free_var(&bound2_var);
@@ -3633,8 +3704,21 @@ numeric_sqrt(PG_FUNCTION_ARGS)
 
 	init_var(&result);
 
-	/* Assume the input was normalized, so arg.weight is accurate */
-	sweight = (arg.weight + 1) * DEC_DIGITS / 2 - 1;
+	/*
+	 * Assume the input was normalized, so arg.weight is accurate.  The result
+	 * then has at least sweight = floor(arg.weight * DEC_DIGITS / 2 + 1)
+	 * digits before the decimal point.  When DEC_DIGITS is even, we can save
+	 * a few cycles, since the division is exact and there is no need to round
+	 * towards negative infinity.
+	 */
+#if DEC_DIGITS == ((DEC_DIGITS / 2) * 2)
+	sweight = arg.weight * DEC_DIGITS / 2 + 1;
+#else
+	if (arg.weight >= 0)
+		sweight = arg.weight * DEC_DIGITS / 2 + 1;
+	else
+		sweight = 1 - (1 - arg.weight * DEC_DIGITS) / 2;
+#endif
 
 	rscale = NUMERIC_MIN_SIG_DIGITS - sweight;
 	rscale = Max(rscale, arg.dscale);
@@ -4162,7 +4246,7 @@ int64_to_numeric(int64 val)
 }
 
 /*
- * Convert val1/(10**val2) to numeric.  This is much faster than normal
+ * Convert val1/(10**log10val2) to numeric.  This is much faster than normal
  * numeric division.
  */
 Numeric
@@ -4170,51 +4254,78 @@ int64_div_fast_to_numeric(int64 val1, int log10val2)
 {
 	Numeric		res;
 	NumericVar	result;
-	int64		saved_val1 = val1;
+	int			rscale;
 	int			w;
 	int			m;
 
+	init_var(&result);
+
+	/* result scale */
+	rscale = log10val2 < 0 ? 0 : log10val2;
+
 	/* how much to decrease the weight by */
 	w = log10val2 / DEC_DIGITS;
-	/* how much is left */
+	/* how much is left to divide by */
 	m = log10val2 % DEC_DIGITS;
+	if (m < 0)
+	{
+		m += DEC_DIGITS;
+		w--;
+	}
 
 	/*
-	 * If there is anything left, multiply the dividend by what's left, then
-	 * shift the weight by one more.
+	 * If there is anything left to divide by (10^m with 0 < m < DEC_DIGITS),
+	 * multiply the dividend by 10^(DEC_DIGITS - m), and shift the weight by
+	 * one more.
 	 */
 	if (m > 0)
 	{
-		static int	pow10[] = {1, 10, 100, 1000};
+#if DEC_DIGITS == 4
+		static const int pow10[] = {1, 10, 100, 1000};
+#elif DEC_DIGITS == 2
+		static const int pow10[] = {1, 10};
+#elif DEC_DIGITS == 1
+		static const int pow10[] = {1};
+#else
+#error unsupported NBASE
+#endif
+		int64		factor = pow10[DEC_DIGITS - m];
+		int64		new_val1;
 
 		StaticAssertDecl(lengthof(pow10) == DEC_DIGITS, "mismatch with DEC_DIGITS");
 
-		if (unlikely(pg_mul_s64_overflow(val1, pow10[DEC_DIGITS - m], &val1)))
+		if (unlikely(pg_mul_s64_overflow(val1, factor, &new_val1)))
 		{
-			/*
-			 * If it doesn't fit, do the whole computation in numeric the slow
-			 * way.  Note that va1l may have been overwritten, so use
-			 * saved_val1 instead.
-			 */
-			int			val2 = 1;
+#ifdef HAVE_INT128
+			/* do the multiplication using 128-bit integers */
+			int128		tmp;
 
-			for (int i = 0; i < log10val2; i++)
-				val2 *= 10;
-			res = numeric_div_opt_error(int64_to_numeric(saved_val1), int64_to_numeric(val2), NULL);
-			res = DatumGetNumeric(DirectFunctionCall2(numeric_round,
-													  NumericGetDatum(res),
-													  Int32GetDatum(log10val2)));
-			return res;
+			tmp = (int128) val1 * (int128) factor;
+
+			int128_to_numericvar(tmp, &result);
+#else
+			/* do the multiplication using numerics */
+			NumericVar	tmp;
+
+			init_var(&tmp);
+
+			int64_to_numericvar(val1, &result);
+			int64_to_numericvar(factor, &tmp);
+			mul_var(&result, &tmp, &result, 0);
+
+			free_var(&tmp);
+#endif
 		}
+		else
+			int64_to_numericvar(new_val1, &result);
+
 		w++;
 	}
-
-	init_var(&result);
-
-	int64_to_numericvar(val1, &result);
+	else
+		int64_to_numericvar(val1, &result);
 
 	result.weight -= w;
-	result.dscale += w * DEC_DIGITS - (DEC_DIGITS - m);
+	result.dscale = rscale;
 
 	res = make_result(&result);
 
@@ -6868,10 +6979,7 @@ set_var_from_str(const char *str, const char *cp,
 	}
 
 	if (!isdigit((unsigned char) *cp))
-		ereturn(escontext, false,
-				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("invalid input syntax for type %s: \"%s\"",
-						"numeric", str)));
+		goto invalid_syntax;
 
 	decdigits = (unsigned char *) palloc(strlen(cp) + DEC_DIGITS * 2);
 
@@ -6892,12 +7000,19 @@ set_var_from_str(const char *str, const char *cp,
 		else if (*cp == '.')
 		{
 			if (have_dp)
-				ereturn(escontext, false,
-						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						 errmsg("invalid input syntax for type %s: \"%s\"",
-								"numeric", str)));
+				goto invalid_syntax;
 			have_dp = true;
 			cp++;
+			/* decimal point must not be followed by underscore */
+			if (*cp == '_')
+				goto invalid_syntax;
+		}
+		else if (*cp == '_')
+		{
+			/* underscore must be followed by more digits */
+			cp++;
+			if (!isdigit((unsigned char) *cp))
+				goto invalid_syntax;
 		}
 		else
 			break;
@@ -6910,17 +7025,8 @@ set_var_from_str(const char *str, const char *cp,
 	/* Handle exponent, if any */
 	if (*cp == 'e' || *cp == 'E')
 	{
-		long		exponent;
-		char	   *endptr;
-
-		cp++;
-		exponent = strtol(cp, &endptr, 10);
-		if (endptr == cp)
-			ereturn(escontext, false,
-					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("invalid input syntax for type %s: \"%s\"",
-							"numeric", str)));
-		cp = endptr;
+		int64		exponent = 0;
+		bool		neg = false;
 
 		/*
 		 * At this point, dweight and dscale can't be more than about
@@ -6930,10 +7036,43 @@ set_var_from_str(const char *str, const char *cp,
 		 * fit in storage format, make_result() will complain about it later;
 		 * for consistency use the same ereport errcode/text as make_result().
 		 */
-		if (exponent >= INT_MAX / 2 || exponent <= -(INT_MAX / 2))
-			ereturn(escontext, false,
-					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-					 errmsg("value overflows numeric format")));
+
+		/* exponent sign */
+		cp++;
+		if (*cp == '+')
+			cp++;
+		else if (*cp == '-')
+		{
+			neg = true;
+			cp++;
+		}
+
+		/* exponent digits */
+		if (!isdigit((unsigned char) *cp))
+			goto invalid_syntax;
+
+		while (*cp)
+		{
+			if (isdigit((unsigned char) *cp))
+			{
+				exponent = exponent * 10 + (*cp++ - '0');
+				if (exponent > PG_INT32_MAX / 2)
+					goto out_of_range;
+			}
+			else if (*cp == '_')
+			{
+				/* underscore must be followed by more digits */
+				cp++;
+				if (!isdigit((unsigned char) *cp))
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+
+		if (neg)
+			exponent = -exponent;
+
 		dweight += (int) exponent;
 		dscale -= (int) exponent;
 		if (dscale < 0)
@@ -6985,6 +7124,220 @@ set_var_from_str(const char *str, const char *cp,
 	*endptr = cp;
 
 	return true;
+
+out_of_range:
+	ereturn(escontext, false,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("value overflows numeric format")));
+
+invalid_syntax:
+	ereturn(escontext, false,
+			(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+			 errmsg("invalid input syntax for type %s: \"%s\"",
+					"numeric", str)));
+}
+
+
+/*
+ * Return the numeric value of a single hex digit.
+ */
+static inline int
+xdigit_value(char dig)
+{
+	return dig >= '0' && dig <= '9' ? dig - '0' :
+		dig >= 'a' && dig <= 'f' ? dig - 'a' + 10 :
+		dig >= 'A' && dig <= 'F' ? dig - 'A' + 10 : -1;
+}
+
+/*
+ * set_var_from_non_decimal_integer_str()
+ *
+ *	Parse a string containing a non-decimal integer
+ *
+ * This function does not handle leading or trailing spaces.  It returns
+ * the end+1 position parsed into *endptr, so that caller can check for
+ * trailing spaces/garbage if deemed necessary.
+ *
+ * cp is the place to actually start parsing; str is what to use in error
+ * reports.  The number's sign and base prefix indicator (e.g., "0x") are
+ * assumed to have already been parsed, so cp should point to the number's
+ * first digit in the base specified.
+ *
+ * base is expected to be 2, 8 or 16.
+ *
+ * Returns true on success, false on failure (if escontext points to an
+ * ErrorSaveContext; otherwise errors are thrown).
+ */
+static bool
+set_var_from_non_decimal_integer_str(const char *str, const char *cp, int sign,
+									 int base, NumericVar *dest,
+									 const char **endptr, Node *escontext)
+{
+	const char *firstdigit = cp;
+	int64		tmp;
+	int64		mul;
+	NumericVar	tmp_var;
+
+	init_var(&tmp_var);
+
+	zero_var(dest);
+
+	/*
+	 * Process input digits in groups that fit in int64.  Here "tmp" is the
+	 * value of the digits in the group, and "mul" is base^n, where n is the
+	 * number of digits in the group.  Thus tmp < mul, and we must start a new
+	 * group when mul * base threatens to overflow PG_INT64_MAX.
+	 */
+	tmp = 0;
+	mul = 1;
+
+	if (base == 16)
+	{
+		while (*cp)
+		{
+			if (isxdigit((unsigned char) *cp))
+			{
+				if (mul > PG_INT64_MAX / 16)
+				{
+					/* Add the contribution from this group of digits */
+					int64_to_numericvar(mul, &tmp_var);
+					mul_var(dest, &tmp_var, dest, 0);
+					int64_to_numericvar(tmp, &tmp_var);
+					add_var(dest, &tmp_var, dest);
+
+					/* Result will overflow if weight overflows int16 */
+					if (dest->weight > SHRT_MAX)
+						goto out_of_range;
+
+					/* Begin a new group */
+					tmp = 0;
+					mul = 1;
+				}
+
+				tmp = tmp * 16 + xdigit_value(*cp++);
+				mul = mul * 16;
+			}
+			else if (*cp == '_')
+			{
+				/* Underscore must be followed by more digits */
+				cp++;
+				if (!isxdigit((unsigned char) *cp))
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+	else if (base == 8)
+	{
+		while (*cp)
+		{
+			if (*cp >= '0' && *cp <= '7')
+			{
+				if (mul > PG_INT64_MAX / 8)
+				{
+					/* Add the contribution from this group of digits */
+					int64_to_numericvar(mul, &tmp_var);
+					mul_var(dest, &tmp_var, dest, 0);
+					int64_to_numericvar(tmp, &tmp_var);
+					add_var(dest, &tmp_var, dest);
+
+					/* Result will overflow if weight overflows int16 */
+					if (dest->weight > SHRT_MAX)
+						goto out_of_range;
+
+					/* Begin a new group */
+					tmp = 0;
+					mul = 1;
+				}
+
+				tmp = tmp * 8 + (*cp++ - '0');
+				mul = mul * 8;
+			}
+			else if (*cp == '_')
+			{
+				/* Underscore must be followed by more digits */
+				cp++;
+				if (*cp < '0' || *cp > '7')
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+	else if (base == 2)
+	{
+		while (*cp)
+		{
+			if (*cp >= '0' && *cp <= '1')
+			{
+				if (mul > PG_INT64_MAX / 2)
+				{
+					/* Add the contribution from this group of digits */
+					int64_to_numericvar(mul, &tmp_var);
+					mul_var(dest, &tmp_var, dest, 0);
+					int64_to_numericvar(tmp, &tmp_var);
+					add_var(dest, &tmp_var, dest);
+
+					/* Result will overflow if weight overflows int16 */
+					if (dest->weight > SHRT_MAX)
+						goto out_of_range;
+
+					/* Begin a new group */
+					tmp = 0;
+					mul = 1;
+				}
+
+				tmp = tmp * 2 + (*cp++ - '0');
+				mul = mul * 2;
+			}
+			else if (*cp == '_')
+			{
+				/* Underscore must be followed by more digits */
+				cp++;
+				if (*cp < '0' || *cp > '1')
+					goto invalid_syntax;
+			}
+			else
+				break;
+		}
+	}
+	else
+		/* Should never happen; treat as invalid input */
+		goto invalid_syntax;
+
+	/* Check that we got at least one digit */
+	if (unlikely(cp == firstdigit))
+		goto invalid_syntax;
+
+	/* Add the contribution from the final group of digits */
+	int64_to_numericvar(mul, &tmp_var);
+	mul_var(dest, &tmp_var, dest, 0);
+	int64_to_numericvar(tmp, &tmp_var);
+	add_var(dest, &tmp_var, dest);
+
+	if (dest->weight > SHRT_MAX)
+		goto out_of_range;
+
+	dest->sign = sign;
+
+	free_var(&tmp_var);
+
+	/* Return end+1 position for caller */
+	*endptr = cp;
+
+	return true;
+
+out_of_range:
+	ereturn(escontext, false,
+			(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+			 errmsg("value overflows numeric format")));
+
+invalid_syntax:
+	ereturn(escontext, false,
+			(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+			 errmsg("invalid input syntax for type %s: \"%s\"",
+					"numeric", str)));
 }
 
 
@@ -8484,6 +8837,9 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 	/*
 	 * If the divisor has just one or two digits, delegate to div_var_int(),
 	 * which uses fast short division.
+	 *
+	 * Similarly, on platforms with 128-bit integer support, delegate to
+	 * div_var_int64() for divisors with three or four digits.
 	 */
 	if (var2ndigits <= 2)
 	{
@@ -8503,6 +8859,26 @@ div_var(const NumericVar *var1, const NumericVar *var2, NumericVar *result,
 		div_var_int(var1, idivisor, idivisor_weight, result, rscale, round);
 		return;
 	}
+#ifdef HAVE_INT128
+	if (var2ndigits <= 4)
+	{
+		int64		idivisor;
+		int			idivisor_weight;
+
+		idivisor = var2->digits[0];
+		idivisor_weight = var2->weight;
+		for (i = 1; i < var2ndigits; i++)
+		{
+			idivisor = idivisor * NBASE + var2->digits[i];
+			idivisor_weight--;
+		}
+		if (var2->sign == NUMERIC_NEG)
+			idivisor = -idivisor;
+
+		div_var_int64(var1, idivisor, idivisor_weight, result, rscale, round);
+		return;
+	}
+#endif
 
 	/*
 	 * Otherwise, perform full long division.
@@ -8774,6 +9150,9 @@ div_var_fast(const NumericVar *var1, const NumericVar *var2,
 	/*
 	 * If the divisor has just one or two digits, delegate to div_var_int(),
 	 * which uses fast short division.
+	 *
+	 * Similarly, on platforms with 128-bit integer support, delegate to
+	 * div_var_int64() for divisors with three or four digits.
 	 */
 	if (var2ndigits <= 2)
 	{
@@ -8793,6 +9172,26 @@ div_var_fast(const NumericVar *var1, const NumericVar *var2,
 		div_var_int(var1, idivisor, idivisor_weight, result, rscale, round);
 		return;
 	}
+#ifdef HAVE_INT128
+	if (var2ndigits <= 4)
+	{
+		int64		idivisor;
+		int			idivisor_weight;
+
+		idivisor = var2->digits[0];
+		idivisor_weight = var2->weight;
+		for (i = 1; i < var2ndigits; i++)
+		{
+			idivisor = idivisor * NBASE + var2->digits[i];
+			idivisor_weight--;
+		}
+		if (var2->sign == NUMERIC_NEG)
+			idivisor = -idivisor;
+
+		div_var_int64(var1, idivisor, idivisor_weight, result, rscale, round);
+		return;
+	}
+#endif
 
 	/*
 	 * Otherwise, perform full long division.
@@ -9180,6 +9579,123 @@ div_var_int(const NumericVar *var, int ival, int ival_weight,
 	/* Strip leading/trailing zeroes */
 	strip_var(result);
 }
+
+
+#ifdef HAVE_INT128
+/*
+ * div_var_int64() -
+ *
+ *	Divide a numeric variable by a 64-bit integer with the specified weight.
+ *	The quotient var / (ival * NBASE^ival_weight) is stored in result.
+ *
+ *	This duplicates the logic in div_var_int(), so any changes made there
+ *	should be made here too.
+ */
+static void
+div_var_int64(const NumericVar *var, int64 ival, int ival_weight,
+			  NumericVar *result, int rscale, bool round)
+{
+	NumericDigit *var_digits = var->digits;
+	int			var_ndigits = var->ndigits;
+	int			res_sign;
+	int			res_weight;
+	int			res_ndigits;
+	NumericDigit *res_buf;
+	NumericDigit *res_digits;
+	uint64		divisor;
+	int			i;
+
+	/* Guard against division by zero */
+	if (ival == 0)
+		ereport(ERROR,
+				errcode(ERRCODE_DIVISION_BY_ZERO),
+				errmsg("division by zero"));
+
+	/* Result zero check */
+	if (var_ndigits == 0)
+	{
+		zero_var(result);
+		result->dscale = rscale;
+		return;
+	}
+
+	/*
+	 * Determine the result sign, weight and number of digits to calculate.
+	 * The weight figured here is correct if the emitted quotient has no
+	 * leading zero digits; otherwise strip_var() will fix things up.
+	 */
+	if (var->sign == NUMERIC_POS)
+		res_sign = ival > 0 ? NUMERIC_POS : NUMERIC_NEG;
+	else
+		res_sign = ival > 0 ? NUMERIC_NEG : NUMERIC_POS;
+	res_weight = var->weight - ival_weight;
+	/* The number of accurate result digits we need to produce: */
+	res_ndigits = res_weight + 1 + (rscale + DEC_DIGITS - 1) / DEC_DIGITS;
+	/* ... but always at least 1 */
+	res_ndigits = Max(res_ndigits, 1);
+	/* If rounding needed, figure one more digit to ensure correct result */
+	if (round)
+		res_ndigits++;
+
+	res_buf = digitbuf_alloc(res_ndigits + 1);
+	res_buf[0] = 0;				/* spare digit for later rounding */
+	res_digits = res_buf + 1;
+
+	/*
+	 * Now compute the quotient digits.  This is the short division algorithm
+	 * described in Knuth volume 2, section 4.3.1 exercise 16, except that we
+	 * allow the divisor to exceed the internal base.
+	 *
+	 * In this algorithm, the carry from one digit to the next is at most
+	 * divisor - 1.  Therefore, while processing the next digit, carry may
+	 * become as large as divisor * NBASE - 1, and so it requires a 128-bit
+	 * integer if this exceeds PG_UINT64_MAX.
+	 */
+	divisor = i64abs(ival);
+
+	if (divisor <= PG_UINT64_MAX / NBASE)
+	{
+		/* carry cannot overflow 64 bits */
+		uint64		carry = 0;
+
+		for (i = 0; i < res_ndigits; i++)
+		{
+			carry = carry * NBASE + (i < var_ndigits ? var_digits[i] : 0);
+			res_digits[i] = (NumericDigit) (carry / divisor);
+			carry = carry % divisor;
+		}
+	}
+	else
+	{
+		/* carry may exceed 64 bits */
+		uint128		carry = 0;
+
+		for (i = 0; i < res_ndigits; i++)
+		{
+			carry = carry * NBASE + (i < var_ndigits ? var_digits[i] : 0);
+			res_digits[i] = (NumericDigit) (carry / divisor);
+			carry = carry % divisor;
+		}
+	}
+
+	/* Store the quotient in result */
+	digitbuf_free(result->buf);
+	result->ndigits = res_ndigits;
+	result->buf = res_buf;
+	result->digits = res_digits;
+	result->weight = res_weight;
+	result->sign = res_sign;
+
+	/* Round or truncate to target rscale (and set result->dscale) */
+	if (round)
+		round_var(result, rscale);
+	else
+		trunc_var(result, rscale);
+
+	/* Strip leading/trailing zeroes */
+	strip_var(result);
+}
+#endif
 
 
 /*

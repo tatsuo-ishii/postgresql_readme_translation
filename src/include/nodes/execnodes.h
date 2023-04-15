@@ -161,6 +161,7 @@ typedef struct ExprState
  *		IndexUnchanged		aminsert hint, cached for retail inserts
  *		Concurrent			are we doing a concurrent index build?
  *		BrokenHotChain		did we detect any broken HOT chains?
+ *		Summarizing			is it a summarizing index?
  *		ParallelWorkers		# of workers requested (excludes leader)
  *		Am					Oid of index AM
  *		AmCache				private cache area for index AM
@@ -194,6 +195,7 @@ typedef struct IndexInfo
 	bool		ii_IndexUnchanged;
 	bool		ii_Concurrent;
 	bool		ii_BrokenHotChain;
+	bool		ii_Summarizing;
 	int			ii_ParallelWorkers;
 	Oid			ii_Am;
 	void	   *ii_AmCache;
@@ -462,7 +464,7 @@ typedef struct ResultRelInfo
 	 */
 	AttrNumber	ri_RowIdAttNo;
 
-	/* For INSERT/UPDATE, attnums of generated columns to be computed */
+	/* For UPDATE, attnums of generated columns to be computed */
 	Bitmapset  *ri_extraUpdatedCols;
 
 	/* Projection to generate new tuple in an INSERT/UPDATE */
@@ -516,11 +518,13 @@ typedef struct ResultRelInfo
 	/* array of constraint-checking expr states */
 	ExprState **ri_ConstraintExprs;
 
-	/* array of stored generated columns expr states */
-	ExprState **ri_GeneratedExprs;
+	/* arrays of stored generated columns expr states, for INSERT and UPDATE */
+	ExprState **ri_GeneratedExprsI;
+	ExprState **ri_GeneratedExprsU;
 
 	/* number of stored generated columns we need to compute */
-	int			ri_NumGeneratedNeeded;
+	int			ri_NumGeneratedNeededI;
+	int			ri_NumGeneratedNeededU;
 
 	/* list of RETURNING expressions */
 	List	   *ri_returningList;
@@ -657,7 +661,10 @@ typedef struct EState
 
 	List	   *es_tupleTable;	/* List of TupleTableSlots */
 
-	uint64		es_processed;	/* # of tuples processed */
+	uint64		es_processed;	/* # of tuples processed during one
+								 * ExecutorRun() call. */
+	uint64		es_total_processed; /* total # of tuples aggregated across all
+									 * ExecutorRun() calls. */
 
 	int			es_top_eflags;	/* eflags passed to ExecutorStart */
 	int			es_instrument;	/* OR of InstrumentOption flags */
@@ -1350,6 +1357,7 @@ struct AppendState
 	ParallelAppendState *as_pstate; /* parallel coordination info */
 	Size		pstate_len;		/* size of parallel coordination info */
 	struct PartitionPruneState *as_prune_state;
+	bool		as_valid_subplans_identified;	/* is as_valid_subplans valid? */
 	Bitmapset  *as_valid_subplans;
 	Bitmapset  *as_valid_asyncplans;	/* valid asynchronous plans indexes */
 	bool		(*choose_next_subplan) (AppendState *);
@@ -2068,7 +2076,8 @@ typedef struct MergeJoinState
  *								OuterTupleSlot is empty!)
  *		hj_OuterTupleSlot		tuple slot for outer tuples
  *		hj_HashTupleSlot		tuple slot for inner (hashed) tuples
- *		hj_NullOuterTupleSlot	prepared null tuple for right/full outer joins
+ *		hj_NullOuterTupleSlot	prepared null tuple for right/right-anti/full
+ *								outer joins
  *		hj_NullInnerTupleSlot	prepared null tuple for left/full outer joins
  *		hj_FirstOuterTupleSlot	first tuple retrieved from outer plan
  *		hj_JoinState			current state of ExecHashJoin state machine

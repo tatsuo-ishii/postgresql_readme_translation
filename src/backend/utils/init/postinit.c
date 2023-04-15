@@ -282,15 +282,17 @@ PerformAuthentication(Port *port)
 
 			if (princ)
 				appendStringInfo(&logmsg,
-								 _(" GSS (authenticated=%s, encrypted=%s, principal=%s)"),
+								 _(" GSS (authenticated=%s, encrypted=%s, deleg_credentials=%s, principal=%s)"),
 								 be_gssapi_get_auth(port) ? _("yes") : _("no"),
 								 be_gssapi_get_enc(port) ? _("yes") : _("no"),
+								 be_gssapi_get_deleg(port) ? _("yes") : _("no"),
 								 princ);
 			else
 				appendStringInfo(&logmsg,
-								 _(" GSS (authenticated=%s, encrypted=%s)"),
+								 _(" GSS (authenticated=%s, encrypted=%s, deleg_credentials=%s)"),
 								 be_gssapi_get_auth(port) ? _("yes") : _("no"),
-								 be_gssapi_get_enc(port) ? _("yes") : _("no"));
+								 be_gssapi_get_enc(port) ? _("yes") : _("no"),
+								 be_gssapi_get_deleg(port) ? _("yes") : _("no"));
 		}
 #endif
 
@@ -398,11 +400,9 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 					PGC_BACKEND, PGC_S_DYNAMIC_DEFAULT);
 
 	/* assign locale variables */
-	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datcollate, &isnull);
-	Assert(!isnull);
+	datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_datcollate);
 	collate = TextDatumGetCString(datum);
-	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datctype, &isnull);
-	Assert(!isnull);
+	datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_datctype);
 	ctype = TextDatumGetCString(datum);
 
 	if (pg_perm_setlocale(LC_COLLATE, collate) == NULL)
@@ -419,12 +419,24 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 						   " which is not recognized by setlocale().", ctype),
 				 errhint("Recreate the database with another locale or install the missing locale.")));
 
+	if (strcmp(ctype, "C") == 0 ||
+		strcmp(ctype, "POSIX") == 0)
+		database_ctype_is_c = true;
+
 	if (dbform->datlocprovider == COLLPROVIDER_ICU)
 	{
-		datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_daticulocale, &isnull);
-		Assert(!isnull);
+		char	   *icurules;
+
+		datum = SysCacheGetAttrNotNull(DATABASEOID, tup, Anum_pg_database_daticulocale);
 		iculocale = TextDatumGetCString(datum);
-		make_icu_collator(iculocale, &default_locale);
+
+		datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_daticurules, &isnull);
+		if (!isnull)
+			icurules = TextDatumGetCString(datum);
+		else
+			icurules = NULL;
+
+		make_icu_collator(iculocale, icurules, &default_locale);
 	}
 	else
 		iculocale = NULL;
@@ -719,6 +731,7 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	bool		am_superuser;
 	char	   *fullpath;
 	char		dbname[NAMEDATALEN];
+	int			nfree = 0;
 
 	elog(DEBUG3, "InitPostgres");
 
@@ -922,26 +935,44 @@ InitPostgres(const char *in_dbname, Oid dboid,
 	}
 
 	/*
-	 * The last few connection slots are reserved for superusers.  Replication
-	 * connections are drawn from slots reserved with max_wal_senders and not
-	 * limited by max_connections or superuser_reserved_connections.
+	 * The last few connection slots are reserved for superusers and roles with
+	 * privileges of pg_use_reserved_connections.  Replication connections are
+	 * drawn from slots reserved with max_wal_senders and are not limited by
+	 * max_connections, superuser_reserved_connections, or
+	 * reserved_connections.
+	 *
+	 * Note: At this point, the new backend has already claimed a proc struct,
+	 * so we must check whether the number of free slots is strictly less than
+	 * the reserved connection limits.
 	 */
 	if (!am_superuser && !am_walsender &&
-		ReservedBackends > 0 &&
-		!HaveNFreeProcs(ReservedBackends))
-		ereport(FATAL,
-				(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
-				 errmsg("remaining connection slots are reserved for non-replication superuser connections")));
+		(SuperuserReservedConnections + ReservedConnections) > 0 &&
+		!HaveNFreeProcs(SuperuserReservedConnections + ReservedConnections, &nfree))
+	{
+		if (nfree < SuperuserReservedConnections)
+			ereport(FATAL,
+					(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+					 errmsg("remaining connection slots are reserved for roles with %s",
+							"SUPERUSER")));
+
+		if (!has_privs_of_role(GetUserId(), ROLE_PG_USE_RESERVED_CONNECTIONS))
+			ereport(FATAL,
+					(errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+					 errmsg("remaining connection slots are reserved for roles with privileges of the \"%s\" role",
+							"pg_use_reserved_connections")));
+	}
 
 	/* Check replication permissions needed for walsender processes. */
 	if (am_walsender)
 	{
 		Assert(!bootstrap);
 
-		if (!superuser() && !has_rolreplication(GetUserId()))
+		if (!has_rolreplication(GetUserId()))
 			ereport(FATAL,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be superuser or replication role to start walsender")));
+					 errmsg("permission denied to start WAL sender"),
+					 errdetail("Only roles with the %s attribute may start a WAL sender process.",
+							   "REPLICATION")));
 	}
 
 	/*

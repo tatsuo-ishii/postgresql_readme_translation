@@ -37,13 +37,17 @@ CLIENTS := client client-dn client-revoked client_ext client-long \
 	client-revoked-utf8
 
 #
-# To add a new non-standard key, add it to SPECIAL_KEYS and then add a recipe
-# for creating it to the "Special-case keys" section below.
+# To add a new non-standard certificate, add it to SPECIAL_CERTS and then add
+# a recipe for creating it to the "Special-case certificates" section below.
 #
+SPECIAL_CERTS := ssl/server-rsapss.crt
+
+# Likewise for non-standard keys
 SPECIAL_KEYS := ssl/server-password.key \
 	ssl/client-der.key \
 	ssl/client-encrypted-pem.key \
-	ssl/client-encrypted-der.key
+	ssl/client-encrypted-der.key \
+	ssl/server-rsapss.key
 
 #
 # These files are just concatenations of other files. You can add new ones to
@@ -57,7 +61,8 @@ COMBINATIONS := \
 	ssl/root+server.crl \
 	ssl/root+client_ca.crt \
 	ssl/root+client.crl \
-	ssl/client+client_ca.crt
+	ssl/client+client_ca.crt \
+	ssl/server-cn-only+server_ca.crt
 
 CERTIFICATES := root_ca server_ca client_ca $(SERVERS) $(CLIENTS)
 STANDARD_CERTS := $(CERTIFICATES:%=ssl/%.crt)
@@ -66,7 +71,13 @@ CRLS := ssl/root.crl \
 	ssl/client.crl \
 	ssl/server.crl
 
-SSLFILES := $(STANDARD_CERTS) $(STANDARD_KEYS) $(SPECIAL_KEYS) $(COMBINATIONS) $(CRLS)
+SSLFILES := \
+	$(STANDARD_CERTS) \
+	$(STANDARD_KEYS) \
+	$(SPECIAL_CERTS) \
+	$(SPECIAL_KEYS) \
+	$(COMBINATIONS) \
+	$(CRLS)
 SSLDIRS := ssl/client-crldir \
 	ssl/server-crldir \
 	ssl/root+client-crldir \
@@ -86,6 +97,10 @@ sslfiles: $(SSLFILES) $(SSLDIRS)
 ssl/root_ca.crt: ssl/root_ca.key conf/root_ca.config
 	$(OPENSSL) req -new -x509 -config conf/root_ca.config -days 10000 -key $< -out $@
 
+# Certificate using RSA-PSS algorithm. Also self-signed.
+ssl/server-rsapss.crt: ssl/server-rsapss.key conf/server-rsapss.config
+	$(OPENSSL) req -new -x509 -config conf/server-rsapss.config -key $< -out $@
+
 #
 # Special-case keys
 #
@@ -95,6 +110,10 @@ ssl/root_ca.crt: ssl/root_ca.key conf/root_ca.config
 # Password-protected version of server-cn-only.key
 ssl/server-password.key: ssl/server-cn-only.key
 	$(OPENSSL) rsa -aes256 -in $< -out $@ -passout 'pass:secret1'
+
+# Key that uses the RSA-PSS algorithm
+ssl/server-rsapss.key:
+	$(OPENSSL) genpkey -algorithm rsa-pss -out $@
 
 # DER-encoded version of client.key
 ssl/client-der.key: ssl/client.key
@@ -131,6 +150,9 @@ ssl/root+client_ca.crt: ssl/root_ca.crt ssl/client_ca.crt
 
 # and for the client, to present to the server
 ssl/client+client_ca.crt: ssl/client.crt ssl/client_ca.crt
+
+# for the server, to present to a client that only knows the root
+ssl/server-cn-only+server_ca.crt: ssl/server-cn-only.crt ssl/server_ca.crt
 
 # If a CRL is used, OpenSSL requires a CRL file for *all* the CAs in the
 # chain, even if some of them are empty.

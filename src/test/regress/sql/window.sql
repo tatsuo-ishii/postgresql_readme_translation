@@ -1220,9 +1220,10 @@ SELECT * FROM
           count(salary) OVER (PARTITION BY depname || '') c1, -- w1
           row_number() OVER (PARTITION BY depname) rn, -- w2
           count(*) OVER (PARTITION BY depname) c2, -- w2
-          count(*) OVER (PARTITION BY '' || depname) c3 -- w3
+          count(*) OVER (PARTITION BY '' || depname) c3, -- w3
+          ntile(2) OVER (PARTITION BY depname) nt -- w2
    FROM empsalary
-) e WHERE rn <= 1 AND c1 <= 3;
+) e WHERE rn <= 1 AND c1 <= 3 AND nt < 2;
 
 -- Ensure we correctly filter out all of the run conditions from each window
 SELECT * FROM
@@ -1230,9 +1231,10 @@ SELECT * FROM
           count(salary) OVER (PARTITION BY depname || '') c1, -- w1
           row_number() OVER (PARTITION BY depname) rn, -- w2
           count(*) OVER (PARTITION BY depname) c2, -- w2
-          count(*) OVER (PARTITION BY '' || depname) c3 -- w3
+          count(*) OVER (PARTITION BY '' || depname) c3, -- w3
+          ntile(2) OVER (PARTITION BY depname) nt -- w2
    FROM empsalary
-) e WHERE rn <= 1 AND c1 <= 3;
+) e WHERE rn <= 1 AND c1 <= 3 AND nt < 2;
 
 -- Tests to ensure we don't push down the run condition when it's not valid to
 -- do so.
@@ -1257,15 +1259,24 @@ SELECT * FROM
    FROM empsalary) emp
 WHERE 3 <= c;
 
--- Ensure we don't pushdown when there are multiple window clauses to evaluate
+-- Ensure we don't use a run condition when there's a volatile function in the
+-- WindowFunc
 EXPLAIN (COSTS OFF)
 SELECT * FROM
   (SELECT empno,
           salary,
-          count(*) OVER (ORDER BY empno DESC) c,
-          dense_rank() OVER (ORDER BY salary DESC) dr
+          count(random()) OVER (ORDER BY empno DESC) c
    FROM empsalary) emp
-WHERE dr = 1;
+WHERE c = 1;
+
+-- Ensure we don't use a run condition when the WindowFunc contains subplans
+EXPLAIN (COSTS OFF)
+SELECT * FROM
+  (SELECT empno,
+          salary,
+          count((SELECT 1)) OVER (ORDER BY empno DESC) c
+   FROM empsalary) emp
+WHERE c = 1;
 
 -- Test Sort node collapsing
 EXPLAIN (COSTS OFF)

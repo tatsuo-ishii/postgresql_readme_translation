@@ -87,7 +87,7 @@ static int	_bt_keep_natts(Relation rel, IndexTuple lastleft,
  *		field themselves.
  */
 BTScanInsert
-_bt_mkscankey(Relation rel, IndexTuple itup)
+_bt_mkscankey(Relation rel, Relation heaprel, IndexTuple itup)
 {
 	BTScanInsert key;
 	ScanKey		skey;
@@ -112,7 +112,7 @@ _bt_mkscankey(Relation rel, IndexTuple itup)
 	key = palloc(offsetof(BTScanInsertData, scankeys) +
 				 sizeof(ScanKeyData) * indnkeyatts);
 	if (itup)
-		_bt_metaversion(rel, &key->heapkeyspace, &key->allequalimage);
+		_bt_metaversion(rel, heaprel, &key->heapkeyspace, &key->allequalimage);
 	else
 	{
 		/* Utility statement callers can set these fields themselves */
@@ -488,8 +488,8 @@ _bt_sort_array_elements(IndexScanDesc scan, ScanKey skey,
 	fmgr_info(cmp_proc, &cxt.flinfo);
 	cxt.collation = skey->sk_collation;
 	cxt.reverse = reverse;
-	qsort_arg((void *) elems, nelems, sizeof(Datum),
-			  _bt_compare_array_elements, (void *) &cxt);
+	qsort_arg(elems, nelems, sizeof(Datum),
+			  _bt_compare_array_elements, &cxt);
 
 	/* Now scan the sorted elements and remove duplicates */
 	return qunique_arg(elems, nelems, sizeof(Datum),
@@ -1761,7 +1761,8 @@ _bt_killitems(IndexScanDesc scan)
 
 		droppedpin = true;
 		/* Attempt to re-read the buffer, getting pin and lock. */
-		buf = _bt_getbuf(scan->indexRelation, so->currPos.currPage, BT_READ);
+		buf = _bt_getbuf(scan->indexRelation, scan->heapRelation,
+						 so->currPos.currPage, BT_READ);
 
 		page = BufferGetPage(buf);
 		if (BufferGetLSNAtomic(buf) == so->currPos.lsn)

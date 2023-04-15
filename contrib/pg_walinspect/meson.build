@@ -19,6 +19,7 @@ contrib_targets += pg_walinspect
 install_data(
   'pg_walinspect.control',
   'pg_walinspect--1.0.sql',
+  'pg_walinspect--1.0--1.1.sql',
   kwargs: contrib_data_args,
 )
 
@@ -29,6 +30,7 @@ tests += {
   'regress': {
     'sql': [
       'pg_walinspect',
+      'oldextversions',
     ],
     # Disabled because these tests require "wal_level=replica", which
     # some runningcheck users do not have (e.g. buildfarm clients).

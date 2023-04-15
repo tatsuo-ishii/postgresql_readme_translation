@@ -52,12 +52,15 @@
 #include "utils/typcache.h"
 
 
-typedef struct LastAttnumInfo
+typedef struct ExprSetupInfo
 {
+	/* Highest attribute numbers fetched from inner/outer/scan tuple slots: */
 	AttrNumber	last_inner;
 	AttrNumber	last_outer;
 	AttrNumber	last_scan;
-} LastAttnumInfo;
+	/* MULTIEXPR SubPlan nodes appearing in the expression: */
+	List	   *multiexpr_subplans;
+} ExprSetupInfo;
 
 static void ExecReadyExpr(ExprState *state);
 static void ExecInitExprRec(Expr *node, ExprState *state,
@@ -65,9 +68,9 @@ static void ExecInitExprRec(Expr *node, ExprState *state,
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
 						 Oid funcid, Oid inputcollid,
 						 ExprState *state);
-static void ExecInitExprSlots(ExprState *state, Node *node);
-static void ExecPushExprSlots(ExprState *state, LastAttnumInfo *info);
-static bool get_last_attnums_walker(Node *node, LastAttnumInfo *info);
+static void ExecCreateExprSetupSteps(ExprState *state, Node *node);
+static void ExecPushExprSetupSteps(ExprState *state, ExprSetupInfo *info);
+static bool expr_setup_walker(Node *node, ExprSetupInfo *info);
 static bool ExecComputeSlotInfo(ExprState *state, ExprEvalStep *op);
 static void ExecInitWholeRowVar(ExprEvalStep *scratch, Var *variable,
 								ExprState *state);
@@ -136,8 +139,8 @@ ExecInitExpr(Expr *node, PlanState *parent)
 	state->parent = parent;
 	state->ext_params = NULL;
 
-	/* Insert EEOP_*_FETCHSOME steps as needed */
-	ExecInitExprSlots(state, (Node *) node);
+	/* Insert setup steps as needed */
+	ExecCreateExprSetupSteps(state, (Node *) node);
 
 	/* Compile the expression proper */
 	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
@@ -173,8 +176,8 @@ ExecInitExprWithParams(Expr *node, ParamListInfo ext_params)
 	state->parent = NULL;
 	state->ext_params = ext_params;
 
-	/* Insert EEOP_*_FETCHSOME steps as needed */
-	ExecInitExprSlots(state, (Node *) node);
+	/* Insert setup steps as needed */
+	ExecCreateExprSetupSteps(state, (Node *) node);
 
 	/* Compile the expression proper */
 	ExecInitExprRec(node, state, &state->resvalue, &state->resnull);
@@ -228,8 +231,8 @@ ExecInitQual(List *qual, PlanState *parent)
 	/* mark expression as to be used with ExecQual() */
 	state->flags = EEO_FLAG_IS_QUAL;
 
-	/* Insert EEOP_*_FETCHSOME steps as needed */
-	ExecInitExprSlots(state, (Node *) qual);
+	/* Insert setup steps as needed */
+	ExecCreateExprSetupSteps(state, (Node *) qual);
 
 	/*
 	 * ExecQual() needs to return false for an expression returning NULL. That
@@ -372,8 +375,8 @@ ExecBuildProjectionInfo(List *targetList,
 
 	state->resultslot = slot;
 
-	/* Insert EEOP_*_FETCHSOME steps as needed */
-	ExecInitExprSlots(state, (Node *) targetList);
+	/* Insert setup steps as needed */
+	ExecCreateExprSetupSteps(state, (Node *) targetList);
 
 	/* Now compile each tlist column */
 	foreach(lc, targetList)
@@ -524,7 +527,7 @@ ExecBuildUpdateProjection(List *targetList,
 	int			nAssignableCols;
 	bool		sawJunk;
 	Bitmapset  *assignedCols;
-	LastAttnumInfo deform = {0, 0, 0};
+	ExprSetupInfo deform = {0, 0, 0, NIL};
 	ExprEvalStep scratch = {0};
 	int			outerattnum;
 	ListCell   *lc,
@@ -603,17 +606,18 @@ ExecBuildUpdateProjection(List *targetList,
 	 * number of columns of the "outer" tuple.
 	 */
 	if (evalTargetList)
-		get_last_attnums_walker((Node *) targetList, &deform);
+		expr_setup_walker((Node *) targetList, &deform);
 	else
 		deform.last_outer = nAssignableCols;
 
-	ExecPushExprSlots(state, &deform);
+	ExecPushExprSetupSteps(state, &deform);
 
 	/*
 	 * Now generate code to evaluate the tlist's assignable expressions or
 	 * fetch them from the outer tuple, incidentally validating that they'll
 	 * be of the right data type.  The checks above ensure that the forboth()
-	 * will iterate over exactly the non-junk columns.
+	 * will iterate over exactly the non-junk columns.  Note that we don't
+	 * bother evaluating any remaining resjunk columns.
 	 */
 	outerattnum = 0;
 	forboth(lc, targetList, lc2, targetColnos)
@@ -674,22 +678,6 @@ ExecBuildUpdateProjection(List *targetList,
 			ExprEvalPushStep(state, &scratch);
 		}
 		outerattnum++;
-	}
-
-	/*
-	 * If we're evaluating the tlist, must evaluate any resjunk columns too.
-	 * (This matters for things like MULTIEXPR_SUBLINK SubPlans.)
-	 */
-	if (evalTargetList)
-	{
-		for_each_cell(lc, targetList, lc)
-		{
-			TargetEntry *tle = lfirst_node(TargetEntry, lc);
-
-			Assert(tle->resjunk);
-			ExecInitExprRec(tle->expr, state,
-							&state->resvalue, &state->resnull);
-		}
 	}
 
 	/*
@@ -1401,6 +1389,21 @@ ExecInitExprRec(Expr *node, ExprState *state,
 			{
 				SubPlan    *subplan = (SubPlan *) node;
 				SubPlanState *sstate;
+
+				/*
+				 * Real execution of a MULTIEXPR SubPlan has already been
+				 * done. What we have to do here is return a dummy NULL record
+				 * value in case this targetlist element is assigned
+				 * someplace.
+				 */
+				if (subplan->subLinkType == MULTIEXPR_SUBLINK)
+				{
+					scratch.opcode = EEOP_CONST;
+					scratch.d.constval.value = (Datum) 0;
+					scratch.d.constval.isnull = true;
+					ExprEvalPushStep(state, &scratch);
+					break;
+				}
 
 				if (!state->parent)
 					elog(ERROR, "SubPlan found with no parent plan");
@@ -2276,6 +2279,110 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				break;
 			}
 
+		case T_JsonValueExpr:
+			{
+				JsonValueExpr *jve = (JsonValueExpr *) node;
+
+				ExecInitExprRec(jve->raw_expr, state, resv, resnull);
+
+				if (jve->formatted_expr)
+				{
+					Datum	   *innermost_caseval = state->innermost_caseval;
+					bool	   *innermost_isnull = state->innermost_casenull;
+
+					state->innermost_caseval = resv;
+					state->innermost_casenull = resnull;
+
+					ExecInitExprRec(jve->formatted_expr, state, resv, resnull);
+
+					state->innermost_caseval = innermost_caseval;
+					state->innermost_casenull = innermost_isnull;
+				}
+				break;
+			}
+
+		case T_JsonConstructorExpr:
+			{
+				JsonConstructorExpr *ctor = (JsonConstructorExpr *) node;
+				List	   *args = ctor->args;
+				ListCell   *lc;
+				int			nargs = list_length(args);
+				int			argno = 0;
+
+				if (ctor->func)
+				{
+					ExecInitExprRec(ctor->func, state, resv, resnull);
+				}
+				else
+				{
+					JsonConstructorExprState *jcstate;
+
+					jcstate = palloc0(sizeof(JsonConstructorExprState));
+
+					scratch.opcode = EEOP_JSON_CONSTRUCTOR;
+					scratch.d.json_constructor.jcstate = jcstate;
+
+					jcstate->constructor = ctor;
+					jcstate->arg_values = (Datum *) palloc(sizeof(Datum) * nargs);
+					jcstate->arg_nulls = (bool *) palloc(sizeof(bool) * nargs);
+					jcstate->arg_types = (Oid *) palloc(sizeof(Oid) * nargs);
+					jcstate->nargs = nargs;
+
+					foreach(lc, args)
+					{
+						Expr	   *arg = (Expr *) lfirst(lc);
+
+						jcstate->arg_types[argno] = exprType((Node *) arg);
+
+						if (IsA(arg, Const))
+						{
+							/* Don't evaluate const arguments every round */
+							Const	   *con = (Const *) arg;
+
+							jcstate->arg_values[argno] = con->constvalue;
+							jcstate->arg_nulls[argno] = con->constisnull;
+						}
+						else
+						{
+							ExecInitExprRec(arg, state,
+											&jcstate->arg_values[argno],
+											&jcstate->arg_nulls[argno]);
+						}
+						argno++;
+					}
+
+					ExprEvalPushStep(state, &scratch);
+				}
+
+				if (ctor->coercion)
+				{
+					Datum	   *innermost_caseval = state->innermost_caseval;
+					bool	   *innermost_isnull = state->innermost_casenull;
+
+					state->innermost_caseval = resv;
+					state->innermost_casenull = resnull;
+
+					ExecInitExprRec(ctor->coercion, state, resv, resnull);
+
+					state->innermost_caseval = innermost_caseval;
+					state->innermost_casenull = innermost_isnull;
+				}
+			}
+			break;
+
+		case T_JsonIsPredicate:
+			{
+				JsonIsPredicate *pred = (JsonIsPredicate *) node;
+
+				ExecInitExprRec((Expr *) pred->expr, state, resv, resnull);
+
+				scratch.opcode = EEOP_IS_JSON;
+				scratch.d.is_json.pred = pred;
+
+				ExprEvalPushStep(state, &scratch);
+				break;
+			}
+
 		case T_NullTest:
 			{
 				NullTest   *ntest = (NullTest *) node;
@@ -2542,36 +2649,38 @@ ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args, Oid funcid,
 }
 
 /*
- * Add expression steps deforming the ExprState's inner/outer/scan slots
- * as much as required by the expression.
+ * Add expression steps performing setup that's needed before any of the
+ * main execution of the expression.
  */
 static void
-ExecInitExprSlots(ExprState *state, Node *node)
+ExecCreateExprSetupSteps(ExprState *state, Node *node)
 {
-	LastAttnumInfo info = {0, 0, 0};
+	ExprSetupInfo info = {0, 0, 0, NIL};
 
-	/*
-	 * Figure out which attributes we're going to need.
-	 */
-	get_last_attnums_walker(node, &info);
+	/* Prescan to find out what we need. */
+	expr_setup_walker(node, &info);
 
-	ExecPushExprSlots(state, &info);
+	/* And generate those steps. */
+	ExecPushExprSetupSteps(state, &info);
 }
 
 /*
- * Add steps deforming the ExprState's inner/out/scan slots as much as
- * indicated by info. This is useful when building an ExprState covering more
- * than one expression.
+ * Add steps performing expression setup as indicated by "info".
+ * This is useful when building an ExprState covering more than one expression.
  */
 static void
-ExecPushExprSlots(ExprState *state, LastAttnumInfo *info)
+ExecPushExprSetupSteps(ExprState *state, ExprSetupInfo *info)
 {
 	ExprEvalStep scratch = {0};
+	ListCell   *lc;
 
 	scratch.resvalue = NULL;
 	scratch.resnull = NULL;
 
-	/* Emit steps as needed */
+	/*
+	 * Add steps deforming the ExprState's inner/outer/scan slots as much as
+	 * required by any Vars appearing in the expression.
+	 */
 	if (info->last_inner > 0)
 	{
 		scratch.opcode = EEOP_INNER_FETCHSOME;
@@ -2602,13 +2711,48 @@ ExecPushExprSlots(ExprState *state, LastAttnumInfo *info)
 		if (ExecComputeSlotInfo(state, &scratch))
 			ExprEvalPushStep(state, &scratch);
 	}
+
+	/*
+	 * Add steps to execute any MULTIEXPR SubPlans appearing in the
+	 * expression.  We need to evaluate these before any of the Params
+	 * referencing their outputs are used, but after we've prepared for any
+	 * Var references they may contain.  (There cannot be cross-references
+	 * between MULTIEXPR SubPlans, so we needn't worry about their order.)
+	 */
+	foreach(lc, info->multiexpr_subplans)
+	{
+		SubPlan    *subplan = (SubPlan *) lfirst(lc);
+		SubPlanState *sstate;
+
+		Assert(subplan->subLinkType == MULTIEXPR_SUBLINK);
+
+		/* This should match what ExecInitExprRec does for other SubPlans: */
+
+		if (!state->parent)
+			elog(ERROR, "SubPlan found with no parent plan");
+
+		sstate = ExecInitSubPlan(subplan, state->parent);
+
+		/* add SubPlanState nodes to state->parent->subPlan */
+		state->parent->subPlan = lappend(state->parent->subPlan,
+										 sstate);
+
+		scratch.opcode = EEOP_SUBPLAN;
+		scratch.d.subplan.sstate = sstate;
+
+		/* The result can be ignored, but we better put it somewhere */
+		scratch.resvalue = &state->resvalue;
+		scratch.resnull = &state->resnull;
+
+		ExprEvalPushStep(state, &scratch);
+	}
 }
 
 /*
- * get_last_attnums_walker: expression walker for ExecInitExprSlots
+ * expr_setup_walker: expression walker for ExecCreateExprSetupSteps
  */
 static bool
-get_last_attnums_walker(Node *node, LastAttnumInfo *info)
+expr_setup_walker(Node *node, ExprSetupInfo *info)
 {
 	if (node == NULL)
 		return false;
@@ -2636,6 +2780,16 @@ get_last_attnums_walker(Node *node, LastAttnumInfo *info)
 		return false;
 	}
 
+	/* Collect all MULTIEXPR SubPlans, too */
+	if (IsA(node, SubPlan))
+	{
+		SubPlan    *subplan = (SubPlan *) node;
+
+		if (subplan->subLinkType == MULTIEXPR_SUBLINK)
+			info->multiexpr_subplans = lappend(info->multiexpr_subplans,
+											   subplan);
+	}
+
 	/*
 	 * Don't examine the arguments or filters of Aggrefs or WindowFuncs,
 	 * because those do not represent expressions to be evaluated within the
@@ -2648,7 +2802,7 @@ get_last_attnums_walker(Node *node, LastAttnumInfo *info)
 		return false;
 	if (IsA(node, GroupingFunc))
 		return false;
-	return expression_tree_walker(node, get_last_attnums_walker,
+	return expression_tree_walker(node, expr_setup_walker,
 								  (void *) info);
 }
 
@@ -3267,7 +3421,7 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 	PlanState  *parent = &aggstate->ss.ps;
 	ExprEvalStep scratch = {0};
 	bool		isCombine = DO_AGGSPLIT_COMBINE(aggstate->aggsplit);
-	LastAttnumInfo deform = {0, 0, 0};
+	ExprSetupInfo deform = {0, 0, 0, NIL};
 
 	state->expr = (Expr *) aggstate;
 	state->parent = parent;
@@ -3283,18 +3437,18 @@ ExecBuildAggTrans(AggState *aggstate, AggStatePerPhase phase,
 	{
 		AggStatePerTrans pertrans = &aggstate->pertrans[transno];
 
-		get_last_attnums_walker((Node *) pertrans->aggref->aggdirectargs,
-								&deform);
-		get_last_attnums_walker((Node *) pertrans->aggref->args,
-								&deform);
-		get_last_attnums_walker((Node *) pertrans->aggref->aggorder,
-								&deform);
-		get_last_attnums_walker((Node *) pertrans->aggref->aggdistinct,
-								&deform);
-		get_last_attnums_walker((Node *) pertrans->aggref->aggfilter,
-								&deform);
+		expr_setup_walker((Node *) pertrans->aggref->aggdirectargs,
+						  &deform);
+		expr_setup_walker((Node *) pertrans->aggref->args,
+						  &deform);
+		expr_setup_walker((Node *) pertrans->aggref->aggorder,
+						  &deform);
+		expr_setup_walker((Node *) pertrans->aggref->aggdistinct,
+						  &deform);
+		expr_setup_walker((Node *) pertrans->aggref->aggfilter,
+						  &deform);
 	}
-	ExecPushExprSlots(state, &deform);
+	ExecPushExprSetupSteps(state, &deform);
 
 	/*
 	 * Emit instructions for each transition value / grouping set combination.

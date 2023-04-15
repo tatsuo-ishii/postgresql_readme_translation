@@ -665,6 +665,7 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_tuples_updated(C.oid) AS n_tup_upd,
             pg_stat_get_tuples_deleted(C.oid) AS n_tup_del,
             pg_stat_get_tuples_hot_updated(C.oid) AS n_tup_hot_upd,
+            pg_stat_get_tuples_newpage_updated(C.oid) AS n_tup_newpage_upd,
             pg_stat_get_live_tuples(C.oid) AS n_live_tup,
             pg_stat_get_dead_tuples(C.oid) AS n_dead_tup,
             pg_stat_get_mod_since_analyze(C.oid) AS n_mod_since_analyze,
@@ -696,7 +697,8 @@ CREATE VIEW pg_stat_xact_all_tables AS
             pg_stat_get_xact_tuples_inserted(C.oid) AS n_tup_ins,
             pg_stat_get_xact_tuples_updated(C.oid) AS n_tup_upd,
             pg_stat_get_xact_tuples_deleted(C.oid) AS n_tup_del,
-            pg_stat_get_xact_tuples_hot_updated(C.oid) AS n_tup_hot_upd
+            pg_stat_get_xact_tuples_hot_updated(C.oid) AS n_tup_hot_upd,
+            pg_stat_get_xact_tuples_newpage_updated(C.oid) AS n_tup_newpage_upd
     FROM pg_class C LEFT JOIN
          pg_index I ON C.oid = I.indrelid
          LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
@@ -977,7 +979,8 @@ CREATE VIEW pg_stat_gssapi AS
             S.pid,
             S.gss_auth AS gss_authenticated,
             S.gss_princ AS principal,
-            S.gss_enc AS encrypted
+            S.gss_enc AS encrypted,
+            S.gss_deleg AS credentials_delegated
     FROM pg_stat_get_activity(NULL) AS S
     WHERE S.client_port IS NOT NULL;
 
@@ -997,7 +1000,8 @@ CREATE VIEW pg_replication_slots AS
             L.confirmed_flush_lsn,
             L.wal_status,
             L.safe_wal_size,
-            L.two_phase
+            L.two_phase,
+            L.conflicting
     FROM pg_get_replication_slots() AS L
             LEFT JOIN pg_database D ON (L.datoid = D.oid);
 
@@ -1065,7 +1069,8 @@ CREATE VIEW pg_stat_database_conflicts AS
             pg_stat_get_db_conflict_lock(D.oid) AS confl_lock,
             pg_stat_get_db_conflict_snapshot(D.oid) AS confl_snapshot,
             pg_stat_get_db_conflict_bufferpin(D.oid) AS confl_bufferpin,
-            pg_stat_get_db_conflict_startup_deadlock(D.oid) AS confl_deadlock
+            pg_stat_get_db_conflict_startup_deadlock(D.oid) AS confl_deadlock,
+            pg_stat_get_db_conflict_logicalslot(D.oid) AS confl_active_logicalslot
     FROM pg_database D;
 
 CREATE VIEW pg_stat_user_functions AS
@@ -1116,6 +1121,26 @@ CREATE VIEW pg_stat_bgwriter AS
         pg_stat_get_buf_fsync_backend() AS buffers_backend_fsync,
         pg_stat_get_buf_alloc() AS buffers_alloc,
         pg_stat_get_bgwriter_stat_reset_time() AS stats_reset;
+
+CREATE VIEW pg_stat_io AS
+SELECT
+       b.backend_type,
+       b.io_object,
+       b.io_context,
+       b.reads,
+       b.read_time,
+       b.writes,
+       b.write_time,
+       b.extends,
+       b.extend_time,
+       b.op_bytes,
+       b.hits,
+       b.evictions,
+       b.reuses,
+       b.fsyncs,
+       b.fsync_time,
+       b.stats_reset
+FROM pg_stat_get_io() b;
 
 CREATE VIEW pg_stat_wal AS
     SELECT
@@ -1301,6 +1326,7 @@ REVOKE ALL ON pg_replication_origin_status FROM public;
 REVOKE ALL ON pg_subscription FROM public;
 GRANT SELECT (oid, subdbid, subskiplsn, subname, subowner, subenabled,
               subbinary, substream, subtwophasestate, subdisableonerr,
+			  subpasswordrequired, subrunasowner,
               subslotname, subsynccommit, subpublications, suborigin)
     ON pg_subscription TO public;
 

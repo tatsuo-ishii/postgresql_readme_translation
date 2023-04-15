@@ -1383,11 +1383,14 @@ check_GUC_name_for_parameter_acl(const char *name)
 }
 
 /*
- * Routine in charge of checking that the initial value of a GUC is the
- * same when declared and when loaded to prevent anybody looking at the
- * C declarations of these GUCS from being fooled by mismatched values.
+ * Routine in charge of checking various states of a GUC.
  *
- * The following validation rules apply:
+ * This performs two sanity checks.  First, it checks that the initial
+ * value of a GUC is the same when declared and when loaded to prevent
+ * anybody looking at the C declarations of these GUCS from being fooled by
+ * mismatched values.  Second, it checks for incorrect flag combinations.
+ *
+ * The following validation rules apply for the values:
  * bool - can be false, otherwise must be same as the boot_val
  * int  - can be 0, otherwise must be same as the boot_val
  * real - can be 0.0, otherwise must be same as the boot_val
@@ -1398,6 +1401,7 @@ check_GUC_name_for_parameter_acl(const char *name)
 static bool
 check_GUC_init(struct config_generic *gconf)
 {
+	/* Checks on values */
 	switch (gconf->vartype)
 	{
 		case PGC_BOOL:
@@ -1460,6 +1464,20 @@ check_GUC_init(struct config_generic *gconf)
 				}
 				break;
 			}
+	}
+
+	/* Flag combinations */
+
+	/*
+	 * GUC_NO_SHOW_ALL requires GUC_NOT_IN_SAMPLE, as a parameter not part
+	 * of SHOW ALL should not be hidden in postgresql.conf.sample.
+	 */
+	if ((gconf->flags & GUC_NO_SHOW_ALL) &&
+		!(gconf->flags & GUC_NOT_IN_SAMPLE))
+	{
+		elog(LOG, "GUC %s flags: NO_SHOW_ALL and !NOT_IN_SAMPLE",
+			 gconf->name);
+		return false;
 	}
 
 	return true;
@@ -4187,12 +4205,12 @@ GetConfigOption(const char *name, bool missing_ok, bool restrict_privileged)
 	if (record == NULL)
 		return NULL;
 	if (restrict_privileged &&
-		(record->flags & GUC_SUPERUSER_ONLY) &&
-		!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS))
+		!ConfigOptionIsVisible(record))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser or have privileges of pg_read_all_settings to examine \"%s\"",
-						name)));
+				 errmsg("permission denied to examine \"%s\"", name),
+				 errdetail("Only roles with privileges of the \"%s\" role may examine this parameter.",
+						   "pg_read_all_settings")));
 
 	switch (record->vartype)
 	{
@@ -4234,12 +4252,12 @@ GetConfigOptionResetString(const char *name)
 
 	record = find_option(name, false, false, ERROR);
 	Assert(record != NULL);
-	if ((record->flags & GUC_SUPERUSER_ONLY) &&
-		!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS))
+	if (!ConfigOptionIsVisible(record))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser or have privileges of pg_read_all_settings to examine \"%s\"",
-						name)));
+				 errmsg("permission denied to examine \"%s\"", name),
+				 errdetail("Only roles with privileges of the \"%s\" role may examine this parameter.",
+						   "pg_read_all_settings")));
 
 	switch (record->vartype)
 	{
@@ -5160,9 +5178,7 @@ get_explain_guc_options(int *num)
 			continue;
 
 		/* return only options visible to the current user */
-		if ((conf->flags & GUC_NO_SHOW_ALL) ||
-			((conf->flags & GUC_SUPERUSER_ONLY) &&
-			 !has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS)))
+		if (!ConfigOptionIsVisible(conf))
 			continue;
 
 		/* return only options that are different from their boot values */
@@ -5243,12 +5259,12 @@ GetConfigOptionByName(const char *name, const char **varname, bool missing_ok)
 		return NULL;
 	}
 
-	if ((record->flags & GUC_SUPERUSER_ONLY) &&
-		!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_SETTINGS))
+	if (!ConfigOptionIsVisible(record))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("must be superuser or have privileges of pg_read_all_settings to examine \"%s\"",
-						name)));
+				 errmsg("permission denied to examine \"%s\"", name),
+				 errdetail("Only roles with privileges of the \"%s\" role may examine this parameter.",
+						   "pg_read_all_settings")));
 
 	if (varname)
 		*varname = record->name;

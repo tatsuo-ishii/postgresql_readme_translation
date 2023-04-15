@@ -692,7 +692,6 @@ static char *GetXLogBuffer(XLogRecPtr ptr, TimeLineID tli);
 static XLogRecPtr XLogBytePosToRecPtr(uint64 bytepos);
 static XLogRecPtr XLogBytePosToEndRecPtr(uint64 bytepos);
 static uint64 XLogRecPtrToBytePos(XLogRecPtr ptr);
-static void GetOldestRestartPointFileName(char *fname);
 
 static void WALInsertLockAcquire(void);
 static void WALInsertLockAcquireExclusive(void);
@@ -2191,6 +2190,8 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 				/* Measure I/O timing to write WAL data */
 				if (track_wal_io_timing)
 					INSTR_TIME_SET_CURRENT(start);
+				else
+					INSTR_TIME_SET_ZERO(start);
 
 				pgstat_report_wait_start(WAIT_EVENT_WAL_WRITE);
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
@@ -2205,8 +2206,7 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 					instr_time	duration;
 
 					INSTR_TIME_SET_CURRENT(duration);
-					INSTR_TIME_SUBTRACT(duration, start);
-					PendingWalStats.wal_write_time += INSTR_TIME_GET_MICROSEC(duration);
+					INSTR_TIME_ACCUM_DIFF(PendingWalStats.wal_write_time, duration, start);
 				}
 
 				PendingWalStats.wal_write++;
@@ -2645,7 +2645,7 @@ XLogFlush(XLogRecPtr record)
 	END_CRIT_SECTION();
 
 	/* wake up walsenders now that we've released heavily contended locks */
-	WalSndWakeupProcessRequests();
+	WalSndWakeupProcessRequests(true, !RecoveryInProgress());
 
 	/*
 	 * If we still haven't flushed to the request point then we have a
@@ -2816,7 +2816,7 @@ XLogBackgroundFlush(void)
 	END_CRIT_SECTION();
 
 	/* wake up walsenders now that we've released heavily contended locks */
-	WalSndWakeupProcessRequests();
+	WalSndWakeupProcessRequests(true, !RecoveryInProgress());
 
 	/*
 	 * Great, done. To take some work off the critical path, try to initialize
@@ -2926,6 +2926,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	XLogSegNo	max_segno;
 	int			fd;
 	int			save_errno;
+	int			open_flags = O_RDWR | O_CREAT | O_EXCL | PG_BINARY;
 
 	Assert(logtli != 0);
 
@@ -2935,7 +2936,8 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	 * Try to use existent file (checkpoint maker may have created it already)
 	 */
 	*added = false;
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | get_sync_bit(sync_method));
+	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+					   get_sync_bit(sync_method));
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
@@ -2958,8 +2960,11 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 
 	unlink(tmppath);
 
+	if (io_direct_flags & IO_DIRECT_WAL_INIT)
+		open_flags |= PG_O_DIRECT;
+
 	/* do not use get_sync_bit() here --- want to fsync only at end of fill */
-	fd = BasicOpenFile(tmppath, O_RDWR | O_CREAT | O_EXCL | PG_BINARY);
+	fd = BasicOpenFile(tmppath, open_flags);
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -2980,7 +2985,7 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 		 * indirect blocks are down on disk.  Therefore, fdatasync(2) or
 		 * O_DSYNC will be sufficient to sync future writes to the log file.
 		 */
-		rc = pg_pwrite_zeros(fd, wal_segment_size);
+		rc = pg_pwrite_zeros(fd, wal_segment_size, 0);
 
 		if (rc < 0)
 			save_errno = errno;
@@ -3096,7 +3101,8 @@ XLogFileInit(XLogSegNo logsegno, TimeLineID logtli)
 		return fd;
 
 	/* Now open original target segment (might not be file I just made) */
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | get_sync_bit(sync_method));
+	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+					   get_sync_bit(sync_method));
 	if (fd < 0)
 		ereport(ERROR,
 				(errcode_for_file_access(),
@@ -3327,7 +3333,8 @@ XLogFileOpen(XLogSegNo segno, TimeLineID tli)
 
 	XLogFilePath(path, tli, segno, wal_segment_size);
 
-	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | get_sync_bit(sync_method));
+	fd = BasicOpenFile(path, O_RDWR | PG_BINARY | O_CLOEXEC |
+					   get_sync_bit(sync_method));
 	if (fd < 0)
 		ereport(PANIC,
 				(errcode_for_file_access(),
@@ -3351,7 +3358,7 @@ XLogFileClose(void)
 	 * use the cache to read the WAL segment.
 	 */
 #if defined(USE_POSIX_FADVISE) && defined(POSIX_FADV_DONTNEED)
-	if (!XLogIsNeeded())
+	if (!XLogIsNeeded() && (io_direct_flags & IO_DIRECT_WAL) == 0)
 		(void) posix_fadvise(openLogFile, 0, 0, POSIX_FADV_DONTNEED);
 #endif
 
@@ -4442,7 +4449,6 @@ show_in_hot_standby(void)
 	return RecoveryInProgress() ? "on" : "off";
 }
 
-
 /*
  * Read the control file, set respective GUCs.
  *
@@ -4461,6 +4467,17 @@ LocalProcessControlFile(bool reset)
 	Assert(reset || ControlFile == NULL);
 	ControlFile = palloc(sizeof(ControlFileData));
 	ReadControlFile();
+}
+
+/*
+ * Get the wal_level from the control file. For a standby, this value should be
+ * considered as its active wal_level, because it may be different from what
+ * was originally configured on standby.
+ */
+WalLevel
+GetActiveWalLevelOnStandby(void)
+{
+	return ControlFile->wal_level;
 }
 
 /*
@@ -4503,7 +4520,7 @@ XLOGShmemSize(void)
 	/* xlblocks array */
 	size = add_size(size, mul_size(sizeof(XLogRecPtr), XLOGbuffers));
 	/* extra alignment padding for XLOG I/O buffers */
-	size = add_size(size, XLOG_BLCKSZ);
+	size = add_size(size, Max(XLOG_BLCKSZ, PG_IO_ALIGN_SIZE));
 	/* and the buffers themselves */
 	size = add_size(size, mul_size(XLOG_BLCKSZ, XLOGbuffers));
 
@@ -4888,12 +4905,10 @@ CleanupAfterArchiveRecovery(TimeLineID EndOfLogTLI, XLogRecPtr EndOfLog,
 	 * Execute the recovery_end_command, if any.
 	 */
 	if (recoveryEndCommand && strcmp(recoveryEndCommand, "") != 0)
-	{
-		char		lastRestartPointFname[MAXFNAMELEN];
-
-		GetOldestRestartPointFileName(lastRestartPointFname);
-		shell_recovery_end(lastRestartPointFname);
-	}
+		ExecuteRecoveryCommand(recoveryEndCommand,
+							   "recovery_end_command",
+							   true,
+							   WAIT_EVENT_RECOVERY_END_COMMAND);
 
 	/*
 	 * We switched to a new timeline. Clean up segments on the old timeline.
@@ -5761,7 +5776,7 @@ StartupXLOG(void)
 	 * If there were cascading standby servers connected to us, nudge any wal
 	 * sender processes to notice that we've been promoted.
 	 */
-	WalSndWakeup();
+	WalSndWakeup(true, true);
 
 	/*
 	 * If this was a promotion, request an (online) checkpoint now. This isn't
@@ -6805,7 +6820,9 @@ CreateCheckPoint(int flags)
 	 */
 	XLByteToSeg(RedoRecPtr, _logSegNo, wal_segment_size);
 	KeepLogSeg(recptr, &_logSegNo);
-	if (InvalidateObsoleteReplicationSlots(_logSegNo))
+	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED,
+										   _logSegNo, InvalidOid,
+										   InvalidTransactionId))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -7249,7 +7266,9 @@ CreateRestartPoint(int flags)
 	replayPtr = GetXLogReplayRecPtr(&replayTLI);
 	endptr = (receivePtr < replayPtr) ? replayPtr : receivePtr;
 	KeepLogSeg(endptr, &_logSegNo);
-	if (InvalidateObsoleteReplicationSlots(_logSegNo))
+	if (InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_REMOVED,
+										   _logSegNo, InvalidOid,
+										   InvalidTransactionId))
 	{
 		/*
 		 * Some slots have been invalidated; recalculate the old-segment
@@ -7310,12 +7329,10 @@ CreateRestartPoint(int flags)
 	 * Finally, execute archive_cleanup_command, if any.
 	 */
 	if (archiveCleanupCommand && strcmp(archiveCleanupCommand, "") != 0)
-	{
-		char		lastRestartPointFname[MAXFNAMELEN];
-
-		GetOldestRestartPointFileName(lastRestartPointFname);
-		shell_archive_cleanup(lastRestartPointFname);
-	}
+		ExecuteRecoveryCommand(archiveCleanupCommand,
+							   "archive_cleanup_command",
+							   false,
+							   WAIT_EVENT_ARCHIVE_CLEANUP_COMMAND);
 
 	return true;
 }
@@ -7964,6 +7981,21 @@ xlog_redo(XLogReaderState *record)
 		/* Update our copy of the parameters in pg_control */
 		memcpy(&xlrec, XLogRecGetData(record), sizeof(xl_parameter_change));
 
+		/*
+		 * Invalidate logical slots if we are in hot standby and the primary
+		 * does not have a WAL level sufficient for logical decoding. No need
+		 * to search for potentially conflicting logically slots if standby is
+		 * running with wal_level lower than logical, because in that case, we
+		 * would have either disallowed creation of logical slots or
+		 * invalidated existing ones.
+		 */
+		if (InRecovery && InHotStandby &&
+			xlrec.wal_level < WAL_LEVEL_LOGICAL &&
+			wal_level >= WAL_LEVEL_LOGICAL)
+			InvalidateObsoleteReplicationSlots(RS_INVAL_WAL_LEVEL,
+											   0, InvalidOid,
+											   InvalidTransactionId);
+
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->MaxConnections = xlrec.MaxConnections;
 		ControlFile->max_worker_processes = xlrec.max_worker_processes;
@@ -8030,34 +8062,26 @@ xlog_redo(XLogReaderState *record)
 }
 
 /*
- * Return the (possible) sync flag used for opening a file, depending on the
- * value of the GUC wal_sync_method.
+ * Return the extra open flags used for opening a file, depending on the
+ * value of the GUCs wal_sync_method, fsync and io_direct.
  */
 static int
 get_sync_bit(int method)
 {
 	int			o_direct_flag = 0;
 
-	/* If fsync is disabled, never open in sync mode */
-	if (!enableFsync)
-		return 0;
-
 	/*
-	 * Optimize writes by bypassing kernel cache with O_DIRECT when using
-	 * O_SYNC and O_DSYNC.  But only if archiving and streaming are disabled,
-	 * otherwise the archive command or walsender process will read the WAL
-	 * soon after writing it, which is guaranteed to cause a physical read if
-	 * we bypassed the kernel cache. We also skip the
-	 * posix_fadvise(POSIX_FADV_DONTNEED) call in XLogFileClose() for the same
-	 * reason.
-	 *
-	 * Never use O_DIRECT in walreceiver process for similar reasons; the WAL
+	 * Use O_DIRECT if requested, except in walreceiver process.  The WAL
 	 * written by walreceiver is normally read by the startup process soon
-	 * after it's written. Also, walreceiver performs unaligned writes, which
+	 * after it's written.  Also, walreceiver performs unaligned writes, which
 	 * don't work with O_DIRECT, so it is required for correctness too.
 	 */
-	if (!XLogIsNeeded() && !AmWalReceiverProcess())
+	if ((io_direct_flags & IO_DIRECT_WAL) && !AmWalReceiverProcess())
 		o_direct_flag = PG_O_DIRECT;
+
+	/* If fsync is disabled, never open in sync mode */
+	if (!enableFsync)
+		return o_direct_flag;
 
 	switch (method)
 	{
@@ -8070,7 +8094,7 @@ get_sync_bit(int method)
 		case SYNC_METHOD_FSYNC:
 		case SYNC_METHOD_FSYNC_WRITETHROUGH:
 		case SYNC_METHOD_FDATASYNC:
-			return 0;
+			return o_direct_flag;
 #ifdef O_SYNC
 		case SYNC_METHOD_OPEN:
 			return O_SYNC | o_direct_flag;
@@ -8151,6 +8175,8 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 	/* Measure I/O timing to sync the WAL file */
 	if (track_wal_io_timing)
 		INSTR_TIME_SET_CURRENT(start);
+	else
+		INSTR_TIME_SET_ZERO(start);
 
 	pgstat_report_wait_start(WAIT_EVENT_WAL_SYNC);
 	switch (sync_method)
@@ -8202,8 +8228,7 @@ issue_xlog_fsync(int fd, XLogSegNo segno, TimeLineID tli)
 		instr_time	duration;
 
 		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-		PendingWalStats.wal_sync_time += INSTR_TIME_GET_MICROSEC(duration);
+		INSTR_TIME_ACCUM_DIFF(PendingWalStats.wal_sync_time, duration, start);
 	}
 
 	PendingWalStats.wal_sync++;
@@ -8888,22 +8913,6 @@ GetOldestRestartPoint(XLogRecPtr *oldrecptr, TimeLineID *oldtli)
 	*oldrecptr = ControlFile->checkPointCopy.redo;
 	*oldtli = ControlFile->checkPointCopy.ThisTimeLineID;
 	LWLockRelease(ControlFileLock);
-}
-
-/*
- * Returns the WAL file name for the last checkpoint or restartpoint.  This is
- * the oldest WAL file that we still need if we have to restart recovery.
- */
-static void
-GetOldestRestartPointFileName(char *fname)
-{
-	XLogRecPtr	restartRedoPtr;
-	TimeLineID	restartTli;
-	XLogSegNo	restartSegNo;
-
-	GetOldestRestartPoint(&restartRedoPtr, &restartTli);
-	XLByteToSeg(restartRedoPtr, restartSegNo, wal_segment_size);
-	XLogFileName(fname, restartTli, restartSegNo, wal_segment_size);
 }
 
 /* Thin wrapper around ShutdownWalRcv(). */

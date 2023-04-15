@@ -17,7 +17,7 @@ subdir = src/backend
 top_builddir = ../..
 include $(top_builddir)/src/Makefile.global
 
-SUBDIRS = access backup bootstrap catalog parser commands executor \
+SUBDIRS = access archive backup bootstrap catalog parser commands executor \
 	foreign lib libpq \
 	main nodes optimizer partitioning port postmaster \
 	regex replication rewrite \
@@ -216,12 +216,6 @@ endif
 
 install-bin: postgres $(POSTGRES_IMP) installdirs
 	$(INSTALL_PROGRAM) postgres$(X) '$(DESTDIR)$(bindir)/postgres$(X)'
-ifneq ($(PORTNAME), win32)
-	@rm -f '$(DESTDIR)$(bindir)/postmaster$(X)'
-	ln -s postgres$(X) '$(DESTDIR)$(bindir)/postmaster$(X)'
-else
-	$(INSTALL_PROGRAM) postgres$(X) '$(DESTDIR)$(bindir)/postmaster$(X)'
-endif
 ifeq ($(MAKE_EXPORTS), true)
 	$(INSTALL_DATA) $(POSTGRES_IMP) '$(DESTDIR)$(pkglibdir)/$(POSTGRES_IMP)'
 	$(INSTALL_PROGRAM) $(MKLDEXPORT) '$(DESTDIR)$(pgxsdir)/$(MKLDEXPORT_DIR)/mkldexport.sh'
@@ -250,7 +244,7 @@ endif
 ##########################################################################
 
 uninstall:
-	rm -f '$(DESTDIR)$(bindir)/postgres$(X)' '$(DESTDIR)$(bindir)/postmaster'
+	rm -f '$(DESTDIR)$(bindir)/postgres$(X)'
 ifeq ($(MAKE_EXPORTS), true)
 	rm -f '$(DESTDIR)$(pkglibdir)/$(POSTGRES_IMP)'
 	rm -f '$(DESTDIR)$(pgxsdir)/$(MKLDEXPORT_DIR)/mkldexport.sh'
